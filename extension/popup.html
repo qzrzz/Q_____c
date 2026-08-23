@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Q_____c 图像解码器</title>
+        <link rel="stylesheet" href="popup.css" />
+        <script type="module" src="popup.js"></script>
+    </head>
+    <body>
+        <header class="topbar">
+            <div class="brand">
+                <img src="icon-pix.png" alt="Q_____c" />
+                <div>
+                    <strong>Q_____c</strong>
+                    <span>IMAGE DECODER</span>
+                </div>
+            </div>
+            <div class="topbar-actions">
+                <span class="local-badge">本地运行</span>
+                <button class="save top-save" type="submit" form="settings-form">保存设置</button>
+            </div>
+        </header>
+
+        <main class="app-shell">
+            <div class="intro">
+                <h1>网页图像解码器</h1>
+                <p>识别并恢复网页中的可逆马赛克图片</p>
+            </div>
+
+            <form id="settings-form" class="settings-form">
+                <section class="setting-card" aria-labelledby="site-title">
+                    <div class="section-heading">
+                        <div>
+                            <h2 id="site-title">生效的网站</h2>
+                            <p>控制扩展在哪些页面扫描图片</p>
+                        </div>
+                    </div>
+                    <div class="option-list" role="radiogroup" aria-label="生效的网站">
+                        <label class="option-row">
+                            <input type="radio" name="site-mode" value="listed" />
+                            <span class="radio-mark"></span>
+                            <span><strong>指定的网站列表</strong><small>只在下方列出的域名中生效</small></span>
+                        </label>
+                        <label class="option-row">
+                            <input type="radio" name="site-mode" value="all" />
+                            <span class="radio-mark"></span>
+                            <span><strong>全部网站</strong><small>在所有网页中识别可逆马赛克</small></span>
+                        </label>
+                        <label class="option-row">
+                            <input type="radio" name="site-mode" value="disabled" />
+                            <span class="radio-mark"></span>
+                            <span><strong>不生效</strong><small>暂停网页图片识别</small></span>
+                        </label>
+                    </div>
+                    <label class="sites-field" id="sites-field">
+                        <span>网站列表</span>
+                        <textarea id="sites" rows="3" placeholder="每行一个域名，例如 example.com"></textarea>
+                        <small>会同时匹配该域名的子域名。</small>
+                    </label>
+                </section>
+
+                <section class="setting-card" aria-labelledby="decode-title">
+                    <div class="section-heading">
+                        <div>
+                            <h2 id="decode-title">解码逻辑</h2>
+                            <p>选择识别出区域后的处理方式</p>
+                        </div>
+                    </div>
+                    <div class="option-list compact" role="radiogroup" aria-label="解码逻辑">
+                        <label class="option-row">
+                            <input type="radio" name="decode-mode" value="button" />
+                            <span class="radio-mark"></span>
+                            <span><strong>显示解码按钮</strong><small>由你确认后替换图片</small></span>
+                        </label>
+                        <label class="option-row">
+                            <input type="radio" name="decode-mode" value="auto" />
+                            <span class="radio-mark"></span>
+                            <span><strong>载入图片自动解码</strong><small>识别成功后立即替换图片</small></span>
+                        </label>
+                    </div>
+                </section>
+
+                <details class="advanced-card">
+                    <summary><span>高级设置</span><small>匹配 editor 的编码参数</small></summary>
+                    <div class="advanced-content">
+                        <label class="field"><span>算法</span>
+                            <select id="algorithm">
+                                <option value="v8">v8（编辑器默认）</option>
+                                <option value="v7">v7</option>
+                                <option value="v6">v6</option>
+                            </select>
+                        </label>
+                        <label class="field"><span>v8 密码</span>
+                            <input id="password" type="password" placeholder="默认 qzrzz" autocomplete="off" />
+                        </label>
+                    </div>
+                </details>
+
+                <output id="status" aria-live="polite"></output>
+            </form>
+
+            <button class="editor" id="open-editor" type="button">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10.5-10.5a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg>
+                <span>打开内置打码工具</span>
+                <svg class="arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+            </button>
+        </main>
+    </body>
+</html>

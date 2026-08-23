@@ -1,0 +1,12 @@
+/* 站点自定义样式会叠在框架默认样式之后 */
+body {
+    background: #09090b;
+}
+
+.stickyHeader {
+    background: rgb(9 9 11 / 80%);
+}
+
+:root {
+    --brand-color: linear-gradient(#caa5a7 30%, #fff 60%);
+}
