@@ -20,6 +20,7 @@ export const page: IPageMeta = {
     metaDesc: "科学的隐私打码解决方案，可逆隐藏隐私，跨平台，免费，开源",
     githubRepo: "https://github.com/qzrzz/Q_____c",
     onlineUrl: "https://qzrzz.com/Q_____c",
+    webAppUrl: "https://qzrzz.github.io/Q_____c/",
     platforms: ["web"],
     mainScreenshotImage: UrlMainScreenshotImage,
 }
@@ -37,7 +38,7 @@ export const sections: ISection[] = [
         id: "restore",
         title: "鲁棒性， 图片发布到社交网站、聊天软件中、再次保存也能恢复",
         description:
-            "使用离散傅里叶变换，将隐私区域转化为频域图像，即使图片被再次保存， 缩放、压缩也能恢复 ",
+            "使用离散傅里叶变换，将隐私区域转化为频域图像，即使图片被再次保存，缩放、压缩也能恢复。支持 JPEG 再次编码。",
         cards: [
             {
                 image: "./assets/s3.png",
@@ -51,8 +52,8 @@ export const sections: ISection[] = [
 
     {
         id: "password",
-        title: "隐私性，可选密码加密，只有提供密码才能恢复",
-        description: "可以为打码添加密码，防止隐私泄露",
+        title: "隐私性，可选密码加密",
+        description: "可以为打码添加密码，只有提供密码才能恢复，防止隐私泄露",
         cards: [{ image: "./assets/s4.png", style: "center" }],
     },
 
@@ -61,7 +62,10 @@ export const sections: ISection[] = [
         title: "便捷性，浏览器插件",
         description: "可以通过浏览器插件方便的把网页中的 Q_____c 马赛克图片恢复为原图",
         cards: [
-            // { image: "./assets/s1.png", style: "center" }
+            {
+                style: "left",
+                imageDesc: `<a href="https://github.com/qzrzz/Q_____c/releases"> → 浏览器插件</a>`,
+            },
         ],
     },
 ]

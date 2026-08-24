@@ -6,7 +6,8 @@ interface DownloadImageMessage {
 
 interface DownloadImageResult {
     ok: boolean
-    buffer?: ArrayBuffer
+    base64?: string
+    contentType?: string
     error?: string
 }
 
@@ -48,6 +49,17 @@ function isDownloadImageMessage(message: unknown): message is DownloadImageMessa
     )
 }
 
+/** 将二进制图片数据转换为可通过 Chrome 运行时消息传递的 Base64 文本。 @param buffer 图片二进制数据 */
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+    const bytes = new Uint8Array(buffer)
+    const chunkSize = 0x8000
+    let binary = ""
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize))
+    }
+    return btoa(binary)
+}
+
 /** 通过扩展后台下载位图，保留站点防盗链校验需要的来源与登录态。 @param url 图片地址 @param pageUrl 发起请求的网页地址 */
 async function downloadImage(url: string, pageUrl: string): Promise<DownloadImageResult> {
     try {
@@ -65,7 +77,12 @@ async function downloadImage(url: string, pageUrl: string): Promise<DownloadImag
         if (!response.ok) return { ok: false, error: `图片请求失败（${response.status}）` }
         const contentType = response.headers.get("content-type") || ""
         if (contentType.includes("image/svg+xml")) return { ok: false, error: "SVG 不是可解码位图" }
-        return { ok: true, buffer: await response.arrayBuffer() }
+        // Chrome runtime 消息按 JSON 序列化，不能直接传递 ArrayBuffer。
+        return {
+            ok: true,
+            base64: arrayBufferToBase64(await response.arrayBuffer()),
+            contentType,
+        }
     } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : "图片请求失败" }
     }

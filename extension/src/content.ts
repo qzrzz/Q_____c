@@ -9,6 +9,7 @@ interface ImageState {
     processing: boolean
     detected: boolean
     decoded: boolean
+    isInViewport: boolean
     outputUrl?: string
     rects: ImageQcRect[]
     button?: HTMLButtonElement
@@ -16,14 +17,29 @@ interface ImageState {
 
 interface DownloadImageResult {
     ok: boolean
-    buffer?: ArrayBuffer
+    base64?: string
+    contentType?: string
     error?: string
 }
 
 const states = new WeakMap<HTMLImageElement, ImageState>()
 const observedImages = new Set<HTMLImageElement>()
+const imageViewportStates = new WeakMap<HTMLImageElement, boolean>()
 let settings: ExtensionSettings
 const DEBUG_PREFIX = "[Q_____c]"
+
+// IntersectionObserver 能感知普通页面和内部滚动容器的裁剪范围，避免固定按钮遗留在屏幕上。
+const imageVisibilityObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+        const image = entry.target as HTMLImageElement
+        const isInViewport = entry.isIntersecting && entry.intersectionRatio > 0
+        imageViewportStates.set(image, isInViewport)
+        const state = states.get(image)
+        if (!state) continue
+        state.isInViewport = isInViewport
+        if (state.button) placeButton(image, state.button)
+    }
+})
 
 /** 在网页控制台输出图片识别与解码诊断信息。 @param message 诊断说明 @param details 附加诊断数据 */
 function debug(message: string, details?: unknown) {
@@ -37,15 +53,18 @@ function installStyles() {
     style.textContent = `
         .q_____c-decoder-button {
             position: fixed !important; z-index: 2147483647 !important;
-            min-height: 30px !important; padding: 0 10px !important;
+            width: 36px !important; height: 36px !important; padding: 0 !important;
+            display: grid !important; place-items: center !important;
             border: 0 !important; border-radius: 5px !important;
             background: #202124 !important; color: #fff !important;
             box-shadow: 0 2px 10px rgb(0 0 0 / 35%) !important;
-            font: 600 12px/30px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif !important;
             cursor: pointer !important;
         }
         .q_____c-decoder-button:hover { background: #3c4043 !important; }
         .q_____c-decoder-button:disabled { cursor: wait !important; opacity: .8 !important; }
+        .q_____c-decoder-button img { width: 22px !important; height: 22px !important; object-fit: contain !important; pointer-events: none !important; }
+        .q_____c-decoder-button .q_____c-decoder-spinner { width: 19px !important; height: 19px !important; animation: q_____c-decoder-spin .75s linear infinite !important; fill: none !important; stroke: currentColor !important; stroke-linecap: round !important; stroke-width: 2.5 !important; }
+        @keyframes q_____c-decoder-spin { to { transform: rotate(360deg); } }
     `
     document.documentElement.append(style)
 }
@@ -63,6 +82,14 @@ function getImageUrl(image: HTMLImageElement): string {
 /** 判断图片地址是否明显指向矢量图或其他不可读取的资源。 @param url 图片地址 */
 function isUnsupportedImageUrl(url: string): boolean {
     return /\.svg(?:[?#]|$)/i.test(url)
+}
+
+/** 将后台传回的 Base64 图片恢复为浏览器可解码的 Blob。 @param base64 图片 Base64 数据 @param contentType 图片 MIME 类型 */
+function base64ToBlob(base64: string, contentType: string): Blob {
+    const binary = atob(base64)
+    const bytes = new Uint8Array(binary.length)
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
+    return new Blob([bytes], { type: contentType || "application/octet-stream" })
 }
 
 /** 删除图片关联的按钮，并释放已替换图片的临时地址。 @param state 图片处理状态 */
@@ -87,9 +114,10 @@ async function downloadImage(url: string): Promise<Blob> {
             }
         )
     })
-    if (!result.ok || !result.buffer) throw new Error(result.error || "后台图片请求失败")
-    debug("后台图片读取成功", { url, bytes: result.buffer.byteLength })
-    return new Blob([result.buffer])
+    if (!result.ok || !result.base64) throw new Error(result.error || "后台图片请求失败")
+    const blob = base64ToBlob(result.base64, result.contentType || "")
+    debug("后台图片读取成功", { url, bytes: blob.size, contentType: blob.type })
+    return blob
 }
 
 /** 把网页图片读取为可供识别算法使用的像素数据。 @param image 网页中的图片元素 */
@@ -165,7 +193,14 @@ async function replaceDecodedImage(
 /** 按图片位置更新悬浮解码按钮。 @param image 目标图片 @param button 与图片关联的按钮 */
 function placeButton(image: HTMLImageElement, button: HTMLButtonElement) {
     const bounds = image.getBoundingClientRect()
-    const visible = bounds.width >= 24 && bounds.height >= 24 && bounds.bottom > 0 && bounds.top < innerHeight
+    const visible =
+        states.get(image)?.isInViewport !== false &&
+        bounds.width >= 24 &&
+        bounds.height >= 24 &&
+        bounds.right > 0 &&
+        bounds.left < innerWidth &&
+        bounds.bottom > 0 &&
+        bounds.top < innerHeight
     button.hidden = !visible
     if (!visible) return
     button.style.left = `${Math.max(4, Math.min(innerWidth - button.offsetWidth - 4, bounds.right - button.offsetWidth - 6))}px`
@@ -182,8 +217,10 @@ function showDecodeButton(image: HTMLImageElement, state: ImageState) {
         document.documentElement.append(button)
         state.button = button
     }
-    state.button.textContent = `解码（${state.rects.length} 区）`
-    state.button.title = "恢复此图片中识别到的 Q_____c 可逆马赛克区域"
+    state.button.classList.remove("is-loading")
+    state.button.innerHTML = `<img src="${chrome.runtime.getURL("icon-pix.png")}" alt="" />`
+    state.button.ariaLabel = `解码图片中的 ${state.rects.length} 个识别区域`
+    state.button.title = `解码图片中的 ${state.rects.length} 个识别区域`
     placeButton(image, state.button)
     debug("已显示解码按钮", { url: state.sourceUrl, rects: state.rects })
 }
@@ -194,11 +231,20 @@ async function inspectImage(image: HTMLImageElement) {
     const sourceUrl = getImageUrl(image)
     if (!sourceUrl || !image.complete || !image.naturalWidth || !image.naturalHeight) return
     if (isUnsupportedImageUrl(sourceUrl)) return
+    // 仅处理足够大的原图，排除头像、导航图标和缩略图，避免无意义的网络与识别开销。
+    if (image.naturalWidth <= 300 || image.naturalHeight <= 300) return
     let state = states.get(image)
     if (state?.outputUrl === sourceUrl) return
     if (!state || state.sourceUrl !== sourceUrl) {
         if (state) disposeState(state)
-        state = { sourceUrl, processing: false, detected: false, decoded: false, rects: [] }
+        state = {
+            sourceUrl,
+            processing: false,
+            detected: false,
+            decoded: false,
+            isInViewport: imageViewportStates.get(image) ?? true,
+            rects: [],
+        }
         states.set(image, state)
     }
     if (state.processing || state.decoded) return
@@ -249,7 +295,9 @@ async function decodeImage(image: HTMLImageElement, state: ImageState, cachedSou
     state.processing = true
     if (state.button) {
         state.button.disabled = true
-        state.button.textContent = "正在解码…"
+        state.button.classList.add("is-loading")
+        state.button.innerHTML = `<svg class="q_____c-decoder-spinner" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.35-5.65"></path></svg>`
+        state.button.ariaLabel = "正在解码图片"
     }
     try {
         const source = cachedSource ?? await readImageData(image)
@@ -265,7 +313,10 @@ async function decodeImage(image: HTMLImageElement, state: ImageState, cachedSou
         })
         if (state.button) {
             state.button.disabled = false
-            state.button.textContent = "解码失败，重试"
+            state.button.classList.remove("is-loading")
+            state.button.innerHTML = `<img src="${chrome.runtime.getURL("icon-pix.png")}" alt="" />`
+            state.button.ariaLabel = "解码失败，点击重试"
+            state.button.title = "解码失败，点击重试"
         }
     } finally {
         state.processing = false
@@ -276,6 +327,7 @@ async function decodeImage(image: HTMLImageElement, state: ImageState, cachedSou
 function observeImage(image: HTMLImageElement) {
     if (observedImages.has(image)) return
     observedImages.add(image)
+    imageVisibilityObserver.observe(image)
     image.addEventListener("load", () => void inspectImage(image))
     if (image.complete) void inspectImage(image)
 }

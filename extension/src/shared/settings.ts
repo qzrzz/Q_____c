@@ -12,7 +12,7 @@ export interface ExtensionSettings {
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
     siteMode: "listed",
-    sites: [],
+    sites: ["www.pixiv.net"],
     decodeMode: "button",
     algorithm: "v8",
     password: "qzrzz",

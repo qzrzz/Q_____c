@@ -1,29 +1,35 @@
 {
-  "manifest_version": 3,
-  "name": "Q_____c Image Decoder",
-  "description": "识别网页中的 Q_____c 可逆马赛克，并在本地恢复图片。",
-  "version": "0.1.1",
-  "icons": {
-    "16": "icon-pix.png",
-    "32": "icon-pix.png",
-    "48": "icon-pix.png",
-    "128": "icon-pix.png"
-  },
-  "permissions": ["storage", "declarativeNetRequest", "declarativeNetRequestWithHostAccess"],
-  "host_permissions": ["<all_urls>"],
-  "action": {
-    "default_title": "Q_____c 图像解码器",
-    "default_popup": "popup.html"
-  },
-  "background": {
-    "service_worker": "background.js",
-    "type": "module"
-  },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ]
+    "manifest_version": 3,
+    "name": "Q_____c 可逆马赛克",
+    "description": "Q_____c 可逆马赛克浏览器插件：识别网页图片并在本地恢复内容。",
+    "version": "0.1.3",
+    "icons": {
+        "16": "icon-pix.png",
+        "32": "icon-pix.png",
+        "48": "icon-pix.png",
+        "128": "icon-pix.png"
+    },
+    "permissions": ["storage", "declarativeNetRequest", "declarativeNetRequestWithHostAccess"],
+    "host_permissions": ["<all_urls>"],
+    "action": {
+        "default_title": "Q_____c 可逆马赛克",
+        "default_popup": "popup.html"
+    },
+    "background": {
+        "service_worker": "background.js",
+        "type": "module"
+    },
+    "web_accessible_resources": [
+        {
+            "resources": ["icon-pix.png"],
+            "matches": ["<all_urls>"]
+        }
+    ],
+    "content_scripts": [
+        {
+            "matches": ["<all_urls>"],
+            "js": ["content.js"],
+            "run_at": "document_idle"
+        }
+    ]
 }

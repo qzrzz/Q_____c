@@ -1,5 +1,6 @@
 <script lang="ts">
 import { defineComponent, nextTick } from "vue"
+import heic2any from "heic2any"
 import {
     fd2image_by_fft,
     image2fd_by_fft,
@@ -56,6 +57,12 @@ type PreScaleMode = "none" | "600" | "720" | "900" | "1080" | "custom"
 
 const JPEG_GRID_SIZE = 16
 const brandIconUrl = new URL("./assets/icon-pix-128.png", import.meta.url).href
+const HEIC_FILE_TYPES = new Set([
+    "image/heic",
+    "image/heif",
+    "image/heic-sequence",
+    "image/heif-sequence",
+])
 
 export default defineComponent({
     name: "App",
@@ -98,6 +105,7 @@ export default defineComponent({
             previewMode: "none" as PreviewMode,
             previewRevision: 0,
             draggingFile: false,
+            importingHeic: false,
             outputUrl: "",
             outputName: "",
             errorMessage: "",
@@ -440,28 +448,56 @@ export default defineComponent({
 
         /** 读取图片文件并初始化画布。 */
         async loadFile(file: File) {
-            if (!file.type.startsWith("image/")) {
+            const isHeic = this.isHeicFile(file)
+            if (!file.type.startsWith("image/") && !isHeic) {
                 this.errorMessage = this.t("invalidFile")
                 return
             }
             this.errorMessage = ""
-            if (this.sourceUrl) URL.revokeObjectURL(this.sourceUrl)
-            this.sourceUrl = URL.createObjectURL(file)
-            const image = new Image()
-            image.decoding = "async"
-            image.src = this.sourceUrl
-            await image.decode()
-            const canvas = document.createElement("canvas")
-            canvas.width = image.naturalWidth
-            canvas.height = image.naturalHeight
-            const context = canvas.getContext("2d", { willReadFrequently: true })!
-            context.drawImage(image, 0, 0)
-            this.sourceImage = image
-            this.originalImageData = context.getImageData(0, 0, canvas.width, canvas.height)
-            this.sourceName = file.name
-            this.sourceMimeType = file.type
-            await this.refreshWorkingImage()
-            if (this.mode === "decode") await this.detectRects()
+            this.importingHeic = isHeic
+            try {
+                const sourceFile = isHeic ? await this.convertHeicToPng(file) : file
+                if (this.sourceUrl) URL.revokeObjectURL(this.sourceUrl)
+                this.sourceUrl = URL.createObjectURL(sourceFile)
+                const image = new Image()
+                image.decoding = "async"
+                image.src = this.sourceUrl
+                await image.decode()
+                const canvas = document.createElement("canvas")
+                canvas.width = image.naturalWidth
+                canvas.height = image.naturalHeight
+                const context = canvas.getContext("2d", { willReadFrequently: true })!
+                context.drawImage(image, 0, 0)
+                this.sourceImage = image
+                this.originalImageData = context.getImageData(0, 0, canvas.width, canvas.height)
+                this.sourceName = file.name
+                this.sourceMimeType = sourceFile.type
+                await this.refreshWorkingImage()
+                if (this.mode === "decode") await this.detectRects()
+            } catch (error) {
+                this.errorMessage = isHeic
+                    ? this.t("heicImportFailed")
+                    : error instanceof Error
+                      ? error.message
+                      : this.t("invalidFile")
+            } finally {
+                this.importingHeic = false
+            }
+        },
+
+        /** 判断文件是否为 HEIF/HEIC 图片，兼容移动端未设置 MIME 类型的文件。 @param file 待检测的文件 */
+        isHeicFile(file: File): boolean {
+            return HEIC_FILE_TYPES.has(file.type.toLowerCase()) || /\.hei[cf]$/i.test(file.name)
+        },
+
+        /** 在浏览器本地将 HEIF/HEIC 文件转换为 PNG，供画布与现有算法读取。 @param file HEIF/HEIC 图片文件 */
+        async convertHeicToPng(file: File): Promise<File> {
+            const converted = await heic2any({ blob: file, toType: "image/png" })
+            const png = Array.isArray(converted) ? converted[0] : converted
+            if (!png) throw new Error("HEIF/HEIC 转换未生成图片")
+            return new File([png], file.name.replace(/\.hei[cf]$/i, ".png"), {
+                type: "image/png",
+            })
         },
 
         /** 把原图绘制到主画布。 */
@@ -496,6 +532,7 @@ export default defineComponent({
         /** 开始创建新的保护矩形。 */
         onPointerDown(event: PointerEvent) {
             if (!this.hasImage || this.busy) return
+            if (window.matchMedia("(max-width: 640px)").matches) return
             const target = event.target as HTMLElement
             if (target.closest(".selection-rect")) return
             ;(this.$refs.stage as HTMLElement).setPointerCapture(event.pointerId)
@@ -558,7 +595,8 @@ export default defineComponent({
             }
             if (!this.drawing || !this.draftRect) return
             this.drawing = false
-            if (this.draftRect.width >= 24 && this.draftRect.height >= 24) {
+            const createdRect = this.draftRect.width >= 24 && this.draftRect.height >= 24
+            if (createdRect) {
                 if (this.mode === "encode") {
                     Object.assign(this.draftRect, this.alignEncodeRect(this.draftRect))
                     this.pushHistory()
@@ -578,6 +616,32 @@ export default defineComponent({
         /** 选中一个已有区域。 */
         selectRect(id: number) {
             this.selectedId = id
+        },
+
+        /** 在图片中央创建一个默认大小的打码区域，供移动端直接拖动调整。 */
+        createRegion() {
+            if (!this.hasImage || this.busy) return
+            const width = Math.min(this.imageWidth, Math.max(24, Math.round(this.imageWidth * 0.32)))
+            const height = Math.min(
+                this.imageHeight,
+                Math.max(24, Math.round(this.imageHeight * 0.32))
+            )
+            let rect: EditorRect = {
+                id: this.nextRectId,
+                x: Math.round((this.imageWidth - width) / 2),
+                y: Math.round((this.imageHeight - height) / 2),
+                width,
+                height,
+            }
+            if (this.mode === "encode") {
+                rect = this.alignEncodeRect(rect)
+                this.pushHistory()
+            }
+            this.rects.push(rect)
+            this.selectedId = rect.id
+            this.nextRectId++
+            this.future = []
+            this.refreshPreviews()
         },
 
         /** 选中区域并开始拖动，编码模式下同时保留撤销快照。 */
@@ -1190,6 +1254,7 @@ export default defineComponent({
             <section
                 class="workspace-card"
                 :class="{ 'is-dragging': draggingFile }"
+                :aria-busy="busy"
                 @dragover.prevent="draggingFile = true"
                 @dragleave.prevent="draggingFile = false"
                 @drop.prevent="onDrop"
@@ -1356,6 +1421,12 @@ export default defineComponent({
                                         }}</small>
                                     </div>
                                 </header>
+                                <div class="mobile-region-creator">
+                                    <button @click="createRegion">
+                                        + {{ t("createMosaicRegion") }}
+                                    </button>
+                                    <small>{{ t("createRegionHint") }}</small>
+                                </div>
                                 <div class="pane-canvas-body">
                                     <div
                                         ref="stage"
@@ -1567,11 +1638,106 @@ export default defineComponent({
             </section>
         </main>
 
+        <footer class="site-footer">
+            <div class="site-footer-inner">
+                <div class="footer-sections">
+                    <section>
+                        <h2>{{ t("footerFeaturesTitle") }}</h2>
+                        <ul class="footer-feature-list">
+                            <li>
+                                <strong>{{ t("featureReversibleName") }}</strong>
+                                <span>{{ t("featureReversibleDescription") }}</span>
+                            </li>
+                            <li>
+                                <strong>{{ t("featureDetectionName") }}</strong>
+                                <span>{{ t("featureDetectionDescription") }}</span>
+                            </li>
+                            <li>
+                                <strong>{{ t("featurePasswordName") }}</strong>
+                                <span>{{ t("featurePasswordDescription") }}</span>
+                            </li>
+                            <li>
+                                <strong>{{ t("featureRobustnessName") }}</strong>
+                                <span>{{ t("featureRobustnessDescription") }}</span>
+                            </li>
+                            <li>
+                                <strong>{{ t("featureLocalName") }}</strong>
+                                <span>{{ t("featureLocalDescription") }}</span>
+                            </li>
+                            <li>
+                                <strong>{{ t("featurePlatformName") }}</strong>
+                                <span>{{ t("featurePlatformDescription") }}</span>
+                            </li>
+                            <li>
+                                <strong>{{ t("featureOpenSourceName") }}</strong>
+                                <span>{{ t("featureOpenSourceDescription") }}</span>
+                            </li>
+                        </ul>
+                    </section>
+                    <section>
+                        <h2>{{ t("footerTipsTitle") }}</h2>
+                        <ul class="footer-tip-list">
+                            <li>{{ t("tipResize") }}</li>
+                            <li>{{ t("tipSocial") }}</li>
+                            <li>{{ t("tipVersion") }}</li>
+                        </ul>
+                    </section>
+                </div>
+                <div class="footer-meta">
+                    <p>
+                        <span>{{ t("projectLandingPage") }}</span>
+                        <a
+                            href="https://qzrzz.com/Q_____c/"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >qzrzz.com/Q_____c/</a
+                        >
+                    </p>
+                    <p>
+                        <span>{{ t("projectRepository") }}</span>
+                        <a
+                            href="https://github.com/qzrzz/Q_____c"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >github.com/qzrzz/Q_____c</a
+                        >
+                    </p>
+                    <p>
+                        <span>{{ t("authorNotice") }}</span>
+                        <a
+                            href="https://qzrzz.com/"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >(C) Qzrzz.com</a
+                        >
+                    </p>
+                </div>
+            </div>
+        </footer>
+
+        <div v-if="busy || importingHeic" class="processing-overlay" role="status" aria-live="assertive">
+            <div class="processing-panel">
+                <span class="pixel-loader" aria-hidden="true">
+                    <i></i><i></i><i></i><i></i>
+                </span>
+                <div>
+                    <strong>{{
+                        importingHeic
+                            ? t("convertingHeic")
+                            : mode === "encode"
+                              ? t("encodingImage")
+                              : t("decodingImage")
+                    }}</strong>
+                    <small>{{ t("processingHint") }}</small>
+                </div>
+            </div>
+        </div>
+
         <input
             ref="fileInput"
             class="visually-hidden"
             type="file"
-            accept="image/*"
+            accept="image/*,.heic,.heif,image/heic,image/heif"
             @change="onFileChange"
         />
 

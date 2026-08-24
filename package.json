@@ -18,7 +18,9 @@
         "build": "rslib build --config ./build/rslib.config.ts",
         "editor:dev": "bun run --cwd editor dev",
         "editor:build": "bun run --cwd editor build",
+        "extension:dev": "bun run build/extension.bun.ts --watch",
         "extension:build": "bun run build/extension.bun.ts",
+        "extension:release": "bun run build/extension.release.bun.ts",
         "build:bundler": "bun run build/build.bun.ts",
         "test": "vitest",
         "build-publish": "npm run build && bun ./build/check-npm-user.ts && npm publish",
@@ -27,7 +29,7 @@
         "web:build": "qpage ./web ./dist-web",
         "web:preview": "qpage --preview ./web ./dist-web",
         "web:i18n:codex": "codex exec 根据./web/translate.md完成翻译任务",
-        "web:publish": "bun run qzrzz-com up ./dist-web ./NewProject",
+        "web:publish": "bun run qzrzz-com up ./dist-web ./Q_____c",
         "web:build-publish": "bun run bun web:build && bun run web:publish"
     },
     "dependencies": {},

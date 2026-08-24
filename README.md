@@ -13,20 +13,25 @@
 Q_____c 会将图片中选定的隐私区域转换为可再次恢复的频域图像。处理结果看起来像马赛克，同时保留恢复原图所需的信息；适合需要“公开时隐藏、必要时恢复”的图片工作流。
 
 > [!IMPORTANT]
-> Q_____c 是**可逆打码**，不是永久匿名化工具。任何能够获得正确密码或兼容解码器的人都有可能恢复内容。对于身份证件、密钥等高风险信息，请直接裁剪或使用不可逆覆盖。
+> Q_____c 是**可逆打码**，不是加密工具，虽然可以设置密码，只有密码才能恢复，但攻击者可能靠算力穷举破解，对于密钥等高风险信息，请谨慎使用。
 
 ![Q_____c 编辑器界面](web/assets/s1.png)
 
 ## 功能特点
 
-- **局部可逆打码**：在图片上框选一个或多个区域，仅转换选中内容。
-- **自动识别与恢复**：解码模式可检测图片中的 Q_____c 频域区域。
-- **密码保护**：推荐的 v8 算法支持使用密码控制编码与恢复。
-- **适应二次处理**：针对常见的图片缩放与 JPEG 再编码提供一定恢复能力。
-- **结果即时预览**：可预览原始、缩放、JPEG 以及 720p JPEG 场景下的恢复效果。
+- **局部可逆打码**：在图片上不同区域打上马赛克遮盖隐私信息，在需要时可解码恢复原图。
+- **自动识别与恢复**：提供被打码的图片自动识别被打码的区域并自动恢复原图。
+- **密码保护**：支持使用密码控制编码与恢复（v8 算法）。
+- **鲁棒性**：针对常见的图片缩放与 JPEG 再编码提供一定恢复能力，可以发布到 Pixiv、Twitter、Facebook 等社交平台。
 - **本地处理**：Web 编辑器在浏览器内完成图像计算，无需上传原图。
 - **跨平台**：提供 Web 编辑器、浏览器扩展以及 TypeScript 核心库。
 - **免费开源**：项目以 MIT 许可证发布。
+
+## 技巧
+
+- 为了保证效果，建议不要大幅二次缩放（也就是再次改变图片尺寸）
+- 如果要发布到社交网站，如 Pixiv、小红书 为了避免网站再次缩放图片，建议先缩放到社交网站推荐尺寸之内，再进行编码。在“打码”工具中设置“提取缩放”选项为需要的尺寸。
+- 不同版本的算法效果不同，且不兼容，解码时必须选对对应版本，请注意选择，绝大多数情况使用最新版本就可以。
 
 ## 在线使用
 
@@ -90,11 +95,7 @@ interface ImageDataLike {
 推荐使用 v8 编码器。它支持密码保护，并针对缩放及有损转码后的载体提供恢复逻辑：
 
 ```ts
-import {
-    fd2image_by_fft_v8,
-    image2fd_by_fft_v8,
-    type ImageDataLike,
-} from "q_____c"
+import { fd2image_by_fft_v8, image2fd_by_fft_v8, type ImageDataLike } from "q_____c"
 
 const source: ImageDataLike = canvasContext.getImageData(0, 0, width, height)
 const password = "请换成你的密码"
@@ -143,15 +144,17 @@ bun run editor:dev
 
 Vite 会输出本地编辑器地址。常用命令如下：
 
-| 命令 | 说明 |
-| --- | --- |
-| `bun run editor:dev` | 启动 Web 编辑器开发服务器 |
-| `bun run editor:build` | 构建 Web 编辑器到 `docs` |
-| `bun run extension:build` | 构建浏览器扩展到 `extension/dist` |
-| `bun run dev` | 监听并构建 TypeScript 核心库 |
-| `bun run build` | 构建核心库到 `dist` |
-| `bun run build:bundler` | 构建包含依赖的版本到 `bundle` |
-| `bun run test` | 使用 Vitest 运行测试 |
+| 命令                        | 说明                                                                     |
+| --------------------------- | ------------------------------------------------------------------------ |
+| `bun run editor:dev`        | 启动 Web 编辑器开发服务器                                                |
+| `bun run editor:build`      | 构建 Web 编辑器到 `docs`                                                 |
+| `bun run extension:dev`     | 监听构建浏览器扩展与内置 editor；修改后需在浏览器扩展页重新加载          |
+| `bun run extension:build`   | 构建浏览器扩展到 `extension/dist`                                        |
+| `bun run extension:release` | 打包 ZIP 并创建或更新同版本的 GitHub Release（需先执行 `gh auth login`） |
+| `bun run dev`               | 监听并构建 TypeScript 核心库                                             |
+| `bun run build`             | 构建核心库到 `dist`                                                      |
+| `bun run build:bundler`     | 构建包含依赖的版本到 `bundle`                                            |
+| `bun run test`              | 使用 Vitest 运行测试                                                     |
 
 ## 项目结构
 
@@ -189,5 +192,3 @@ Vite 会输出本地编辑器地址。常用命令如下：
 ## 许可证
 
 [MIT](https://opensource.org/license/mit/)
-
- 
