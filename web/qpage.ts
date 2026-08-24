@@ -13,11 +13,12 @@ import UrlMainScreenshotImage from "./assets/s1.png"
 export const page: IPageMeta = {
     productTitle: "Q_____c",
     productTitleCN: "科学马赛克",
-    tagline: "科学的隐私打码解决方案，可逆隐藏隐私，跨平台，免费，开源",
+    tagline: "科学的隐私打码解决方案，可逆马赛克，跨平台，免费，开源",
     taglineShort: "可逆隐私打码",
     icon: UrlIcon,
     iconFull: UrlIconFull,
-    metaDesc: "科学的隐私打码解决方案，可逆隐藏隐私，跨平台，免费，开源",
+    metaDesc:
+        "科学的隐私打码解决方案，可逆马赛克，跨平台，免费，开源，Q_____c，Q_c，骑马赛克，可逆马赛克，隐私打码",
     githubRepo: "https://github.com/qzrzz/Q_____c",
     onlineUrl: "https://qzrzz.com/Q_____c",
     webAppUrl: "https://qzrzz.github.io/Q_____c/",

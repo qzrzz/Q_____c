@@ -5,7 +5,7 @@ import chalk from "chalk"
 
 const outputDirectory = "./extension/dist"
 const watchMode = Bun.argv.includes("--watch")
-const staticFiles = ["manifest.json", "popup.html", "popup.css"]
+const staticFiles = ["manifest.json", "popup.html", "popup.css", "font.css"]
 
 /** 运行子进程，并在失败时带上可读的构建错误。 @param command 要执行的命令与参数 @param cwd 命令工作目录 */
 async function run(command: string[], cwd = ".") {
@@ -13,7 +13,7 @@ async function run(command: string[], cwd = ".") {
     if ((await process.exited) !== 0) throw new Error(`${command.join(" ")} 构建失败`)
 }
 
-/** 复制扩展清单、弹窗资源和图标到可加载目录。 */
+/** 复制扩展清单、弹窗资源与嵌入式字体样式、图标到可加载目录。 */
 async function copyStaticFiles() {
     await Promise.all([
         ...staticFiles.map((file) =>

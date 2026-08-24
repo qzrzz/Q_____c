@@ -1703,6 +1703,14 @@ export default defineComponent({
                         >
                     </p>
                     <p>
+                        <a
+                            href="https://github.com/qzrzz/Q_____c/releases"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            >{{ t("browserExtension") }}</a
+                        >
+                    </p>
+                    <p>
                         <span>{{ t("authorNotice") }}</span>
                         <a
                             href="https://qzrzz.com/"

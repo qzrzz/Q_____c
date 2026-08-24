@@ -4,29 +4,42 @@
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>Q_____c 可逆马赛克</title>
+        <link rel="stylesheet" href="font.css" />
         <link rel="stylesheet" href="popup.css" />
         <script type="module" src="popup.js"></script>
     </head>
     <body>
         <header class="topbar">
             <div class="brand">
-                <img src="icon-pix.png" alt="Q_____c" />
+                <img class="brand-icon" src="icon-pix.png" alt="Q_____c" />
                 <div>
                     <strong>Q_____c</strong>
-                    <span>REVERSIBLE MOSAIC</span>
+                    <span>PIXEL DECODER</span>
                 </div>
             </div>
             <div class="topbar-actions">
-                <span class="local-badge">本地运行</span>
+                <button class="top-btn open-editor" id="open-editor-top" type="button">打码工具</button>
                 <button class="save top-save" type="submit" form="settings-form">保存设置</button>
             </div>
         </header>
 
         <main class="app-shell">
             <div class="intro">
-                <h1>可逆马赛克浏览器插件</h1>
+                <p class="eyebrow">~/qmosaic/extension v0.1.3</p>
+                <h1>可逆马赛克<br />浏览器插件</h1>
                 <p>识别并恢复网页中的可逆马赛克图片</p>
             </div>
+
+            <section class="run-card" aria-labelledby="run-title">
+                <div class="run-card-copy">
+                    <span class="run-card-pixel" aria-hidden="true"></span>
+                    <div>
+                        <h2 id="run-title">在此当前页面运行</h2>
+                        <p>扫描当前标签页，并为识别到的图片添加解码按钮。</p>
+                    </div>
+                </div>
+                <button class="run-page" id="run-current-page" type="button">开始扫描 <span aria-hidden="true">→</span></button>
+            </section>
 
             <form id="settings-form" class="settings-form">
                 <section class="setting-card" aria-labelledby="site-title">
@@ -101,9 +114,9 @@
             </form>
 
             <button class="editor" id="open-editor" type="button">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10.5-10.5a2.8 2.8 0 0 0-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path></svg>
+                <span class="editor-pixel" aria-hidden="true">✦</span>
                 <span>打开内置打码工具</span>
-                <svg class="arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+                <span class="arrow" aria-hidden="true">→</span>
             </button>
         </main>
     </body>
