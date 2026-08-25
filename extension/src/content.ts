@@ -1,6 +1,7 @@
 import { fd2image_by_fft_v6 } from "../../src/core/image2fd_by_fft-v6"
 import { fd2image_by_fft_v7 } from "../../src/core/image2fd_by_fft-v7"
 import { fd2image_by_fft_v8 } from "../../src/core/image2fd_by_fft-v8"
+import { fd2image_by_fft_v8c } from "../../src/core/image2fd_by_fft-v8c"
 import { getImageQcRects, type ImageQcRect } from "../../src/helper/getImageQcRects"
 import { isSiteEnabled, loadSettings, type ExtensionSettings } from "./shared/settings"
 
@@ -245,6 +246,13 @@ async function decodeRect(image: ImageData, rect: ImageQcRect): Promise<ImageDat
     }
     if (settings.algorithm === "v7") {
         const result = await fd2image_by_fft_v7(image, { carrierX: rect.x, carrierY: rect.y })
+        return new ImageData(new Uint8ClampedArray(result.data), result.width, result.height)
+    }
+    if (settings.algorithm === "v8c") {
+        const result = await fd2image_by_fft_v8c(image, settings.password, {
+            carrierX: rect.x,
+            carrierY: rect.y,
+        })
         return new ImageData(new Uint8ClampedArray(result.data), result.width, result.height)
     }
     const result = await fd2image_by_fft_v8(image, settings.password, {

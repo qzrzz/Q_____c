@@ -2,7 +2,7 @@
     "manifest_version": 3,
     "name": "Q_____c 可逆马赛克",
     "description": "Q_____c 可逆马赛克浏览器插件：识别网页图片并在本地恢复内容。",
-    "version": "0.1.4",
+    "version": "0.1.5",
     "icons": {
         "16": "icon-pix.png",
         "32": "icon-pix.png",

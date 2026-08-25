@@ -1,6 +1,6 @@
 export type SiteMode = "listed" | "all" | "disabled"
 export type DecodeMode = "button" | "auto"
-export type AlgorithmId = "v6" | "v7" | "v8"
+export type AlgorithmId = "v6" | "v7" | "v8" | "v8c"
 
 export interface ExtensionSettings {
     siteMode: SiteMode
@@ -58,7 +58,7 @@ export async function loadSettings(): Promise<ExtensionSettings> {
         decodeMode: ["button", "auto"].includes(String(stored.decodeMode))
             ? (stored.decodeMode as DecodeMode)
             : DEFAULT_SETTINGS.decodeMode,
-        algorithm: ["v6", "v7", "v8"].includes(String(stored.algorithm))
+        algorithm: ["v6", "v7", "v8", "v8c"].includes(String(stored.algorithm))
             ? (stored.algorithm as AlgorithmId)
             : DEFAULT_SETTINGS.algorithm,
         password: typeof stored.password === "string" ? stored.password : DEFAULT_SETTINGS.password,

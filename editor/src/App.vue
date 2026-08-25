@@ -153,9 +153,11 @@ export default defineComponent({
     mounted() {
         applyLocale(this.locale)
         window.addEventListener("keydown", this.onKeyDown)
+        window.addEventListener("paste", this.onPaste)
     },
     beforeUnmount() {
         window.removeEventListener("keydown", this.onKeyDown)
+        window.removeEventListener("paste", this.onPaste)
         this.releaseUrls()
         this.password = ""
     },
@@ -459,6 +461,51 @@ export default defineComponent({
             if (file) await this.loadFile(file)
         },
 
+        /** 处理剪贴板粘贴图片。 @param event 剪贴板粘贴事件 */
+        async onPaste(event: ClipboardEvent) {
+            const clipboardData = event.clipboardData
+            if (!clipboardData) return
+
+            // 优先从 files 提取图片
+            let file: File | null = null
+            if (clipboardData.files && clipboardData.files.length > 0) {
+                for (let i = 0; i < clipboardData.files.length; i++) {
+                    const currentFile = clipboardData.files[i]
+                    if (currentFile.type.startsWith("image/") || this.isHeicFile(currentFile)) {
+                        file = currentFile
+                        break
+                    }
+                }
+            }
+
+            // 若 files 中未匹配到图片，尝试从 items 中提取图片 Blob/File
+            if (!file && clipboardData.items && clipboardData.items.length > 0) {
+                for (let i = 0; i < clipboardData.items.length; i++) {
+                    const item = clipboardData.items[i]
+                    if (
+                        item.kind === "file" &&
+                        (item.type.startsWith("image/") || HEIC_FILE_TYPES.has(item.type.toLowerCase()))
+                    ) {
+                        const blobFile = item.getAsFile()
+                        if (blobFile) {
+                            const extension = item.type.split("/")[1] || "png"
+                            const name =
+                                blobFile.name && blobFile.name !== "image.png"
+                                    ? blobFile.name
+                                    : `clipboard-${Date.now()}.${extension}`
+                            file = new File([blobFile], name, { type: blobFile.type || item.type })
+                            break
+                        }
+                    }
+                }
+            }
+
+            if (file) {
+                event.preventDefault()
+                await this.loadFile(file)
+            }
+        },
+
         /** 读取图片文件并初始化画布。 */
         async loadFile(file: File) {
             const isHeic = this.isHeicFile(file)
@@ -483,7 +530,7 @@ export default defineComponent({
                 context.drawImage(image, 0, 0)
                 this.sourceImage = image
                 this.originalImageData = context.getImageData(0, 0, canvas.width, canvas.height)
-                this.sourceName = file.name
+                this.sourceName = file.name || `clipboard-${Date.now()}.png`
                 this.sourceMimeType = sourceFile.type
                 await this.refreshWorkingImage()
                 if (this.mode === "decode") await this.detectRects()
