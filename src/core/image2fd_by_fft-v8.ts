@@ -17,11 +17,18 @@ const ENHANCEMENT_STRENGTH = 0.12
 const FREQUENCY_COMPRESSION_EXPONENT = 0.38
 const LOCAL_FREQUENCY_ALPHA = 252
 const RELIABLE_FREQUENCY_ALPHA = 251
+const V8C_FREQUENCY_ALPHA = 250
 const LOCAL_FREQUENCY_BOUND = MAX_PIXEL_VALUE * LOCAL_BLOCK_SIZE * LOCAL_BLOCK_SIZE
 const WHITENING_PEDESTAL = 8
 const SCALE_PILOT_PERIOD = 16
 const SCALE_PILOT_AMPLITUDE = 7
 const RELIABLE_SCALE_PILOT_AMPLITUDE = 14
+const V8C_BASE_STRENGTH = [0.7, 0.9, 0.9] as const
+const V8C_ENHANCEMENT_STRENGTH = 0.17
+const V8C_BORDER_COLOR = [240, 16, 240] as const
+const V8C_BORDER_SIZE = 1
+// 2x2 基础码元缩到 0.4 以下后已小于单个输出像素，同时导频会出现倍频歧义。
+// 因此自动尺度搜索只承诺 0.4x 以上，避免把正常的 0.8x 错认成二次谐波。
 const MIN_RAW_SCALE = 0.4
 const MAX_RAW_SCALE = 2.5
 const DEFAULT_PASSWORD = "qzrzz"
@@ -40,6 +47,9 @@ export interface FdV8DecodeOptions {
     /** 已知时可直接指定编码载体高度，跳过导频尺寸估算。 */
     encodedHeight?: number
 }
+
+/** v8c 仅在调用方明确给出编码尺寸时使用尺度归一化上下文。 */
+export type FdV8cDecodeOptions = FdV8DecodeOptions
 
 interface AxisNormalization {
     scale: number
@@ -72,6 +82,47 @@ const ENHANCEMENT_ASSIGNMENTS: CoefficientAssignment[] = Array.from(
     const scoreB = b.rank * (b.channel === 0 ? 1 : 1.55)
     return scoreA - scoreB || a.channel - b.channel || a.rank - b.rank
 }).slice(0, 96)
+
+/** v8c 的 Cb、Cr 均值保存仅供 PNG 使用的 32 个额外系数。 */
+const V8C_COLOR_BASE_ASSIGNMENTS: CoefficientAssignment[] = Array.from(
+    { length: 192 },
+    (_, index) => ({ channel: Math.floor(index / 64), rank: index % 64 })
+).filter(({ channel, rank }) => !BASE_KEYS.has(`${channel}:${rank}`))
+    .sort((a, b) => {
+        const scoreA = a.rank * (a.channel === 0 ? 1 : 1.35)
+        const scoreB = b.rank * (b.channel === 0 ? 1 : 1.35)
+        return scoreA - scoreB || a.channel - b.channel || a.rank - b.rank
+    })
+    .slice(0, CELL_COUNT * 2)
+
+/**
+ * 每个 2x2 码元的 Y 均值保存 JPEG 基础层，Cb、Cr 均值扩展 PNG 容量。
+ * 这种排列让有损解码完全不依赖容易被 4:2:0 破坏的色度码字。
+ */
+const V8C_BASE_ASSIGNMENTS: CoefficientAssignment[] = Array.from(
+    { length: CELL_COUNT * COLOR_CHANNEL_COUNT },
+    (_, index) => {
+        const logicalCell = Math.floor(index / COLOR_CHANNEL_COUNT)
+        const storage = index % COLOR_CHANNEL_COUNT
+        return storage === 0
+            ? BASE_ASSIGNMENTS[logicalCell]
+            : V8C_COLOR_BASE_ASSIGNMENTS[logicalCell * 2 + storage - 1]
+    }
+)
+const V8C_BASE_KEYS = new Set(
+    V8C_BASE_ASSIGNMENTS.map(({ channel, rank }) => `${channel}:${rank}`)
+)
+/** v8c 的 PNG 增强层用 Cb、Cr 正交纹理保存最有价值的 96 个剩余系数。 */
+const V8C_ENHANCEMENT_ASSIGNMENTS: CoefficientAssignment[] = Array.from(
+    { length: 192 },
+    (_, index) => ({ channel: Math.floor(index / 64), rank: index % 64 })
+).filter(({ channel, rank }) => !V8C_BASE_KEYS.has(`${channel}:${rank}`))
+    .sort((a, b) => {
+        const scoreA = a.rank * (a.channel === 0 ? 1 : 1.35)
+        const scoreB = b.rank * (b.channel === 0 ? 1 : 1.35)
+        return scoreA - scoreB || a.channel - b.channel || a.rank - b.rank
+    })
+    .slice(0, CELL_COUNT * 6)
 
 /** 抗缩放基础层以四个 4x4 码元保存四个最低频亮度系数。 */
 const RELIABLE_BASE_ASSIGNMENTS: CoefficientAssignment[] = [
@@ -123,6 +174,53 @@ function rgbToYcbcr(red: number, green: number, blue: number): [number, number, 
 function ycbcrToRgb(y: number, cb: number, cr: number): [number, number, number] {
     cb -= 128; cr -= 128
     return [clampByte(y + 1.402 * cr), clampByte(y - 0.344136 * cb - 0.714136 * cr), clampByte(y + 1.772 * cb)]
+}
+
+/** 为 v8c 载体绘制一像素洋红色识别边框。 @param image v8c 载体 */
+function paintV8cBorder(image: ImageDataLike): void {
+    for (let y = 0; y < image.height; y++) for (let x = 0; x < image.width; x++) {
+        if (x >= V8C_BORDER_SIZE && y >= V8C_BORDER_SIZE &&
+            x < image.width - V8C_BORDER_SIZE && y < image.height - V8C_BORDER_SIZE) continue
+        const offset = (y * image.width + x) * CHANNEL_COUNT
+        image.data[offset] = V8C_BORDER_COLOR[0]
+        image.data[offset + 1] = V8C_BORDER_COLOR[1]
+        image.data[offset + 2] = V8C_BORDER_COLOR[2]
+    }
+}
+
+/** 解码前用内侧像素替换 v8c 识别边框，降低边框对边缘频谱的污染。 @param image 输入载体 */
+function removeV8cBorder(image: ImageDataLike): ImageDataLike {
+    if (image.width <= V8C_BORDER_SIZE * 2 || image.height <= V8C_BORDER_SIZE * 2) return image
+    const output = createImageDataLike(image.width, image.height)
+    output.data.set(image.data)
+    for (let y = 0; y < image.height; y++) for (let x = 0; x < image.width; x++) {
+        if (x >= V8C_BORDER_SIZE && y >= V8C_BORDER_SIZE &&
+            x < image.width - V8C_BORDER_SIZE && y < image.height - V8C_BORDER_SIZE) continue
+        const sourceX = Math.max(V8C_BORDER_SIZE, Math.min(image.width - V8C_BORDER_SIZE - 1, x))
+        const sourceY = Math.max(V8C_BORDER_SIZE, Math.min(image.height - V8C_BORDER_SIZE - 1, y))
+        const sourceOffset = (sourceY * image.width + sourceX) * CHANNEL_COUNT
+        const targetOffset = (y * image.width + x) * CHANNEL_COUNT
+        for (let channel = 0; channel < CHANNEL_COUNT; channel++) {
+            output.data[targetOffset + channel] = image.data[sourceOffset + channel]
+        }
+    }
+    return output
+}
+
+/** 用相邻恢复像素补齐被识别边框占用的最外圈。 @param image 已解码图像 */
+function restoreV8cOutputBorder(image: ImageDataLike): void {
+    if (image.width <= V8C_BORDER_SIZE * 2 || image.height <= V8C_BORDER_SIZE * 2) return
+    for (let y = 0; y < image.height; y++) for (let x = 0; x < image.width; x++) {
+        if (x >= V8C_BORDER_SIZE && y >= V8C_BORDER_SIZE &&
+            x < image.width - V8C_BORDER_SIZE && y < image.height - V8C_BORDER_SIZE) continue
+        const sourceX = Math.max(V8C_BORDER_SIZE, Math.min(image.width - V8C_BORDER_SIZE - 1, x))
+        const sourceY = Math.max(V8C_BORDER_SIZE, Math.min(image.height - V8C_BORDER_SIZE - 1, y))
+        const sourceOffset = (sourceY * image.width + sourceX) * CHANNEL_COUNT
+        const targetOffset = (y * image.width + x) * CHANNEL_COUNT
+        for (let channel = 0; channel < COLOR_CHANNEL_COUNT; channel++) {
+            image.data[targetOffset + channel] = image.data[sourceOffset + channel]
+        }
+    }
 }
 
 /** 编码频谱系数。 @param value 系数 @param bound 幅值上限 */
@@ -368,15 +466,46 @@ function estimateEncodedAxisSize(image: ImageDataLike, horizontal: boolean): num
     if (Math.abs(bestScale - 1) < 0.08) return currentSize
     const approximateSize = Math.max(1, Math.round(currentSize / bestScale))
     let bestSize = approximateSize
+    let refinedBestEnergy = -Infinity
     for (let size = Math.max(1, approximateSize - 12); size <= approximateSize + 12; size++) {
         const period = (SCALE_PILOT_PERIOD * currentSize) / size
         const energy = calculatePilotEnergy(projection, period)
-        if (energy > bestEnergy) {
-            bestEnergy = energy
+        if (energy > refinedBestEnergy) {
+            refinedBestEnergy = energy
             bestSize = size
         }
     }
-    return Math.max(LOCAL_BLOCK_SIZE, Math.round(bestSize / LOCAL_BLOCK_SIZE) * LOCAL_BLOCK_SIZE)
+    // 原图尺寸不一定是 8 的倍数；强制块对齐会把 820x558 一类区域误判为
+    // 824x560，并令后续所有 2x2 码元错位。导频已经能给出逐像素尺寸，因此保留精确值。
+    // 小区域只有数个导频周期，插值可能带来 1 像素估算误差。编码尺寸非常接近
+    // 8x8 分块边界时优先吸附到边界；距离更远则保留真实的非对齐尺寸。
+    const alignedSize = Math.round(bestSize / LOCAL_BLOCK_SIZE) * LOCAL_BLOCK_SIZE
+    return Math.max(1, Math.abs(alignedSize - bestSize) <= 1 ? alignedSize : bestSize)
+}
+
+/**
+ * 联合两轴导频估算编码尺寸，消除整数缩放取整导致的单轴一至两像素偏差。
+ * @param image 当前载体图像
+ */
+function estimateEncodedDimensions(image: ImageDataLike): [number, number] {
+    let width = estimateEncodedAxisSize(image, true)
+    let height = estimateEncodedAxisSize(image, false)
+    if (width === image.width && height === image.height) return [width, height]
+    const scaleX = image.width / width
+    const scaleY = image.height / height
+    const meanScale = (scaleX + scaleY) / 2
+    if (Math.abs(scaleX - scaleY) / meanScale >= 0.03) return [width, height]
+
+    // 完整块边界是强约束：若一轴已准确落在 8 像素边界，使用该轴尺度修正
+    // 另一轴由整数目标尺寸造成的轻微误差。两轴都非对齐时则保留导频原始结果。
+    if (width % LOCAL_BLOCK_SIZE === 0 && height % LOCAL_BLOCK_SIZE !== 0) {
+        const uniformHeight = Math.round(image.height / scaleX)
+        if (Math.abs(uniformHeight - height) <= 2) height = uniformHeight
+    } else if (height % LOCAL_BLOCK_SIZE === 0 && width % LOCAL_BLOCK_SIZE !== 0) {
+        const uniformWidth = Math.round(image.width / scaleY)
+        if (Math.abs(uniformWidth - width) <= 2) width = uniformWidth
+    }
+    return [width, height]
 }
 
 /**
@@ -553,6 +682,56 @@ function encodeFullLocalBlock(output: ImageDataLike, frequencies: Float64Array[]
     }
 }
 
+/** 写入 v8c 彩色分层 8x8 载体块。 @param output 输出 @param frequencies 三路频谱 @param blockX 横坐标 @param blockY 纵坐标 @param key 载体密钥 */
+function encodeV8cLocalBlock(output: ImageDataLike, frequencies: Float64Array[], blockX: number, blockY: number, key: CarrierKey): void {
+    const permutation = createCellPermutation(blockX, blockY, key)
+    for (let cell = 0; cell < CELL_COUNT; cell++) {
+        const logicalCell = permutation[cell]
+        const cellX = (cell % 4) * CARRIER_CELL_SIZE
+        const cellY = Math.floor(cell / 4) * CARRIER_CELL_SIZE
+        const baseCodes = new Float64Array(COLOR_CHANNEL_COUNT)
+        for (let storage = 0; storage < COLOR_CHANNEL_COUNT; storage++) {
+            const base = V8C_BASE_ASSIGNMENTS[logicalCell * COLOR_CHANNEL_COUNT + storage]
+            const rawCode = encodeFrequencyValue(
+                frequencies[base.channel][LOCAL_FREQUENCY_ORDER[base.rank]],
+                LOCAL_FREQUENCY_BOUND
+            )
+            const whitened = whitenFrequencyCode(
+                rawCode,
+                getCarrierSign(blockX, blockY, logicalCell, 800 + storage, key)
+            )
+            baseCodes[storage] =
+                PIXEL_CENTER + (whitened - PIXEL_CENTER) * V8C_BASE_STRENGTH[storage]
+        }
+        const deltas = Array.from({ length: 2 }, () => new Float64Array(3))
+        for (let storage = 0; storage < 2; storage++) for (let pattern = 0; pattern < 3; pattern++) {
+            const assignment = V8C_ENHANCEMENT_ASSIGNMENTS[logicalCell * 6 + storage * 3 + pattern]
+            const rawCode = encodeFrequencyValue(
+                frequencies[assignment.channel][LOCAL_FREQUENCY_ORDER[assignment.rank]],
+                LOCAL_FREQUENCY_BOUND
+            )
+            const sign = getCarrierSign(blockX, blockY, logicalCell, 900 + storage * 3 + pattern, key)
+            deltas[storage][pattern] = whitenFrequencyCode(rawCode, sign) - PIXEL_CENTER
+        }
+        for (let y = 0; y < CARRIER_CELL_SIZE; y++) for (let x = 0; x < CARRIER_CELL_SIZE; x++) {
+            const values: [number, number, number] = [baseCodes[0], baseCodes[1], baseCodes[2]]
+            for (let storage = 0; storage < 2; storage++) {
+                for (let pattern = 0; pattern < 3; pattern++) {
+                    values[storage + 1] +=
+                        V8C_ENHANCEMENT_STRENGTH *
+                        deltas[storage][pattern] *
+                        getCellPattern(pattern, x, y)
+                }
+            }
+            const offset = ((blockY + cellY + y) * output.width + blockX + cellX + x) * CHANNEL_COUNT
+            const rgb = ycbcrToRgb(values[0], values[1], values[2])
+            output.data[offset] = rgb[0]
+            output.data[offset + 1] = rgb[1]
+            output.data[offset + 2] = rgb[2]
+        }
+    }
+}
+
 /** 写入抗缩放 8x8 载体块。 @param output 输出 @param frequencies 三路频谱 @param blockX 横坐标 @param blockY 纵坐标 @param key 载体密钥 */
 function encodeReliableLocalBlock(output: ImageDataLike, frequencies: Float64Array[], blockX: number, blockY: number, key: CarrierKey): void {
     const macroPermutation = createReliablePermutation(blockX, blockY, key)
@@ -677,6 +856,79 @@ function hasStandardEnhancement(image: ImageDataLike, key: CarrierKey): boolean 
     return error / (LOCAL_BLOCK_SIZE * LOCAL_BLOCK_SIZE * COLOR_CHANNEL_COUNT) < 0.5
 }
 
+/** 恢复 v8c 彩色分层 8x8 频谱块。 @param image 载体 @param blockX 横坐标 @param blockY 纵坐标 @param enhanced 是否恢复增强层 @param key 载体密钥 */
+function decodeV8cLocalBlock(image: ImageDataLike, blockX: number, blockY: number, enhanced: boolean, key: CarrierKey): Float64Array[] {
+    const frequencies = Array.from({ length: COLOR_CHANNEL_COUNT }, () => new Float64Array(64))
+    const permutation = createCellPermutation(blockX, blockY, key)
+    for (let cell = 0; cell < CELL_COUNT; cell++) {
+        const logicalCell = permutation[cell]
+        const cellX = (cell % 4) * CARRIER_CELL_SIZE
+        const cellY = Math.floor(cell / 4) * CARRIER_CELL_SIZE
+        const averages = new Float64Array(COLOR_CHANNEL_COUNT)
+        const projections = Array.from({ length: 2 }, () => new Float64Array(3))
+        for (let y = 0; y < CARRIER_CELL_SIZE; y++) for (let x = 0; x < CARRIER_CELL_SIZE; x++) {
+            const offset = ((blockY + cellY + y) * image.width + blockX + cellX + x) * CHANNEL_COUNT
+            const values = rgbToYcbcr(image.data[offset], image.data[offset + 1], image.data[offset + 2])
+            for (let storage = 0; storage < COLOR_CHANNEL_COUNT; storage++) {
+                averages[storage] += values[storage] / (CARRIER_CELL_SIZE * CARRIER_CELL_SIZE)
+            }
+            if (enhanced) for (let pattern = 0; pattern < 3; pattern++) {
+                const texture = getCellPattern(pattern, x, y)
+                for (let storage = 0; storage < 2; storage++) {
+                    projections[storage][pattern] += values[storage + 1] * texture
+                }
+            }
+        }
+        for (let storage = 0; storage < COLOR_CHANNEL_COUNT; storage++) {
+            // JPEG 只信任 Y 均值基础层；Cb、Cr 均值仅在确认是完整 PNG 时启用。
+            if (storage > 0 && !enhanced) continue
+            const base = V8C_BASE_ASSIGNMENTS[logicalCell * COLOR_CHANNEL_COUNT + storage]
+            const compressedCode =
+                PIXEL_CENTER +
+                (averages[storage] - PIXEL_CENTER) / V8C_BASE_STRENGTH[storage]
+            const baseCode = unwhitenFrequencyCode(
+                compressedCode,
+                getCarrierSign(blockX, blockY, logicalCell, 800 + storage, key)
+            )
+            frequencies[base.channel][LOCAL_FREQUENCY_ORDER[base.rank]] =
+                decodeFrequencyValue(baseCode, LOCAL_FREQUENCY_BOUND)
+        }
+        if (enhanced) for (let storage = 0; storage < 2; storage++) for (let pattern = 0; pattern < 3; pattern++) {
+            const assignment = V8C_ENHANCEMENT_ASSIGNMENTS[logicalCell * 6 + storage * 3 + pattern]
+            const code = unwhitenFrequencyCode(
+                PIXEL_CENTER + projections[storage][pattern] /
+                    (CARRIER_CELL_SIZE * CARRIER_CELL_SIZE * V8C_ENHANCEMENT_STRENGTH),
+                getCarrierSign(blockX, blockY, logicalCell, 900 + storage * 3 + pattern, key)
+            )
+            frequencies[assignment.channel][LOCAL_FREQUENCY_ORDER[assignment.rank]] =
+                decodeFrequencyValue(code, LOCAL_FREQUENCY_BOUND)
+        }
+    }
+    return frequencies
+}
+
+/** 判断 v8c 的无损增强纹理是否仍然完整。 @param image 已移除导频的载体 @param key 载体密钥 */
+function hasV8cEnhancement(image: ImageDataLike, key: CarrierKey): boolean {
+    if (image.width < LOCAL_BLOCK_SIZE || image.height < LOCAL_BLOCK_SIZE) return false
+    const blockX = image.width >= LOCAL_BLOCK_SIZE * 2 ? LOCAL_BLOCK_SIZE : 0
+    const blockY = image.height >= LOCAL_BLOCK_SIZE * 2 ? LOCAL_BLOCK_SIZE : 0
+    const frequencies = decodeV8cLocalBlock(image, blockX, blockY, true, key)
+    const reconstructed = createImageDataLike(
+        blockX + LOCAL_BLOCK_SIZE,
+        blockY + LOCAL_BLOCK_SIZE
+    )
+    encodeV8cLocalBlock(reconstructed, frequencies, blockX, blockY, key)
+    let error = 0
+    for (let y = 0; y < LOCAL_BLOCK_SIZE; y++) for (let x = 0; x < LOCAL_BLOCK_SIZE; x++) {
+        const sourceOffset = ((blockY + y) * image.width + blockX + x) * CHANNEL_COUNT
+        const targetOffset = ((blockY + y) * reconstructed.width + blockX + x) * CHANNEL_COUNT
+        for (let channel = 0; channel < COLOR_CHANNEL_COUNT; channel++) {
+            error += Math.abs(image.data[sourceOffset + channel] - reconstructed.data[targetOffset + channel])
+        }
+    }
+    return error / (LOCAL_BLOCK_SIZE * LOCAL_BLOCK_SIZE * COLOR_CHANNEL_COUNT) < 0.75
+}
+
 /** 恢复抗缩放 8x8 频谱块。 @param image 载体 @param blockX 横坐标 @param blockY 纵坐标 @param enhanced 是否恢复增强层 @param key 载体密钥 */
 function decodeReliableLocalBlock(image: ImageDataLike, blockX: number, blockY: number, enhanced: boolean, key: CarrierKey): Float64Array[] {
     const frequencies = Array.from({ length: 3 }, () => new Float64Array(64))
@@ -794,6 +1046,29 @@ function stabilizeScaledFrequencies(frequencies: Float64Array[]): void {
     }
 }
 
+/** 限制 v8c 缩放载体中的三路低频异常值。 @param frequencies 当前块的三路频谱 */
+function stabilizeV8cScaledFrequencies(frequencies: Float64Array[]): void {
+    const yDcIndex = LOCAL_FREQUENCY_ORDER[0]
+    frequencies[0][yDcIndex] = Math.max(0, Math.min(LOCAL_FREQUENCY_BOUND, frequencies[0][yDcIndex]))
+    for (let rank = 1; rank < CELL_COUNT; rank++) {
+        const index = LOCAL_FREQUENCY_ORDER[rank]
+        const bound = 4600 / Math.sqrt(rank)
+        frequencies[0][index] = Math.max(-bound, Math.min(bound, frequencies[0][index]))
+    }
+    for (let channel = 1; channel < COLOR_CHANNEL_COUNT; channel++) {
+        const dcIndex = LOCAL_FREQUENCY_ORDER[0]
+        frequencies[channel][dcIndex] = Math.max(
+            64 * LOCAL_BLOCK_SIZE * LOCAL_BLOCK_SIZE,
+            Math.min(192 * LOCAL_BLOCK_SIZE * LOCAL_BLOCK_SIZE, frequencies[channel][dcIndex])
+        )
+        for (let rank = 1; rank < CELL_COUNT; rank++) {
+            const index = LOCAL_FREQUENCY_ORDER[rank]
+            const bound = 2400 / Math.sqrt(rank)
+            frequencies[channel][index] = Math.max(-bound, Math.min(bound, frequencies[channel][index]))
+        }
+    }
+}
+
 /**
  * 对缩放且有损转码的恢复图执行保守降噪，避免不可靠色差码元形成强烈伪色。
  * @param image 初步恢复的空间图像
@@ -883,12 +1158,11 @@ export async function fd2image_by_fft_v8(
         options.carrierY % SCALE_PILOT_PERIOD === 0 &&
         (options.carrierX + targetWidth) % SCALE_PILOT_PERIOD === 0 &&
         (options.carrierY + targetHeight) % SCALE_PILOT_PERIOD === 0
-    const encodedWidth = options.encodedWidth ?? (
-        isAlignedUnscaledRegion ? targetWidth : estimateEncodedAxisSize(fdImageData, true)
-    )
-    const encodedHeight = options.encodedHeight ?? (
-        isAlignedUnscaledRegion ? targetHeight : estimateEncodedAxisSize(fdImageData, false)
-    )
+    const estimatedDimensions = isAlignedUnscaledRegion
+        ? [targetWidth, targetHeight]
+        : estimateEncodedDimensions(fdImageData)
+    const encodedWidth = options.encodedWidth ?? estimatedDimensions[0]
+    const encodedHeight = options.encodedHeight ?? estimatedDimensions[1]
     const wasRawScaled = encodedWidth !== targetWidth || encodedHeight !== targetHeight
     const normalizedCarrier = wasRawScaled
         ? normalizeScaledCarrier(fdImageData, encodedWidth, encodedHeight, options)
@@ -941,6 +1215,104 @@ export async function scale_fd_by_fft_v8(
     assertValidImageData(fdImage); assertValidDimensions(targetWidth, targetHeight)
     return image2fd_by_fft_v8(
         resize_image(await fd2image_by_fft_v8(fdImage, password), targetWidth, targetHeight),
+        password
+    )
+}
+
+/** 将原图转换为彩色分层 v8c 载体。 @param imageData 原始图像 @param password 用户密码，默认 qzrzz */
+export async function image2fd_by_fft_v8c(
+    imageData: ImageDataLike,
+    password = DEFAULT_PASSWORD
+): Promise<ImageDataLike> {
+    assertValidImageData(imageData)
+    const key = await deriveCarrierKey(password)
+    const output = createImageDataLike(imageData.width, imageData.height)
+    for (let blockY = 0; blockY < imageData.height; blockY += LOCAL_BLOCK_SIZE) {
+        for (let blockX = 0; blockX < imageData.width; blockX += LOCAL_BLOCK_SIZE) {
+            const width = Math.min(LOCAL_BLOCK_SIZE, imageData.width - blockX)
+            const height = Math.min(LOCAL_BLOCK_SIZE, imageData.height - blockY)
+            const frequencies = transformLocalBlock(imageData, blockX, blockY, width, height)
+            if (width === LOCAL_BLOCK_SIZE && height === LOCAL_BLOCK_SIZE) {
+                encodeV8cLocalBlock(output, frequencies, blockX, blockY, key)
+            } else {
+                encodePartialLocalBlock(output, frequencies, blockX, blockY, width, height, key)
+            }
+        }
+    }
+    for (let pixel = 0; pixel < imageData.width * imageData.height; pixel++) {
+        output.data[pixel * CHANNEL_COUNT + 3] = V8C_FREQUENCY_ALPHA
+    }
+    paintV8cBorder(output)
+    return output
+}
+
+/**
+ * 将 v8c 彩色载体恢复为空间图像。
+ * @param fdImageData 彩色频域载体
+ * @param password 用户密码，默认 qzrzz
+ * @param options 载体在处理后整图中的可选位置信息
+ */
+export async function fd2image_by_fft_v8c(
+    fdImageData: ImageDataLike,
+    password = DEFAULT_PASSWORD,
+    options: FdV8cDecodeOptions = {}
+): Promise<ImageDataLike> {
+    assertValidImageData(fdImageData)
+    const key = await deriveCarrierKey(password)
+    const targetWidth = fdImageData.width
+    const targetHeight = fdImageData.height
+    // v8c 将导频空间全部让给彩色数据，不再自动猜测缩放前尺寸。
+    // 调用方明确提供原始尺寸时仍可尽力归一化，默认始终按当前像素网格解码。
+    const encodedWidth = options.encodedWidth ?? targetWidth
+    const encodedHeight = options.encodedHeight ?? targetHeight
+    const wasRawScaled = encodedWidth !== targetWidth || encodedHeight !== targetHeight
+    const normalizedCarrier = wasRawScaled
+        ? normalizeScaledCarrier(fdImageData, encodedWidth, encodedHeight, options)
+        : fdImageData
+    const carrier = removeV8cBorder(normalizedCarrier)
+    const inputCenterAlpha = fdImageData.data[
+        (Math.floor(fdImageData.height / 2) * fdImageData.width +
+            Math.floor(fdImageData.width / 2)) * CHANNEL_COUNT + 3
+    ]
+    const enhanced = !wasRawScaled && (
+        inputCenterAlpha === V8C_FREQUENCY_ALPHA || hasV8cEnhancement(carrier, key)
+    )
+    const output = createImageDataLike(encodedWidth, encodedHeight)
+    for (let blockY = 0; blockY < carrier.height; blockY += LOCAL_BLOCK_SIZE) {
+        for (let blockX = 0; blockX < carrier.width; blockX += LOCAL_BLOCK_SIZE) {
+            const width = Math.min(LOCAL_BLOCK_SIZE, carrier.width - blockX)
+            const height = Math.min(LOCAL_BLOCK_SIZE, carrier.height - blockY)
+            const frequencies = width === LOCAL_BLOCK_SIZE && height === LOCAL_BLOCK_SIZE
+                ? decodeV8cLocalBlock(carrier, blockX, blockY, enhanced, key)
+                : decodePartialLocalBlock(carrier, blockX, blockY, width, height, key)
+            if (wasRawScaled && width === LOCAL_BLOCK_SIZE && height === LOCAL_BLOCK_SIZE) {
+                stabilizeV8cScaledFrequencies(frequencies)
+            }
+            restoreLocalBlock(output, frequencies, blockX, blockY, width, height)
+        }
+    }
+    for (let pixel = 0; pixel < output.width * output.height; pixel++) {
+        output.data[pixel * CHANNEL_COUNT + 3] = MAX_PIXEL_VALUE
+    }
+    restoreV8cOutputBorder(output)
+    const wasLossyTranscoded = inputCenterAlpha >= MAX_PIXEL_VALUE - 1
+    const stabilized = wasRawScaled && wasLossyTranscoded && hasSevereChromaArtifacts(output)
+        ? stabilizeLossyScaledOutput(output)
+        : output
+    return wasRawScaled ? resize_image(stabilized, targetWidth, targetHeight) : stabilized
+}
+
+/** 缩放并重新编码 v8c 载体。 @param fdImage 载体 @param targetWidth 目标宽度 @param targetHeight 目标高度 @param password 用户密码，默认 qzrzz */
+export async function scale_fd_by_fft_v8c(
+    fdImage: ImageDataLike,
+    targetWidth: number,
+    targetHeight: number,
+    password = DEFAULT_PASSWORD
+): Promise<ImageDataLike> {
+    assertValidImageData(fdImage)
+    assertValidDimensions(targetWidth, targetHeight)
+    return image2fd_by_fft_v8c(
+        resize_image(await fd2image_by_fft_v8c(fdImage, password), targetWidth, targetHeight),
         password
     )
 }

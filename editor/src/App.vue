@@ -27,6 +27,11 @@ import {
     image2fd_by_fft_v8,
     scale_fd_by_fft_v8,
 } from "../../src/core/image2fd_by_fft-v8"
+import {
+    fd2image_by_fft_v8c,
+    image2fd_by_fft_v8c,
+    scale_fd_by_fft_v8c,
+} from "../../src/core/image2fd_by_fft-v8c"
 import { getImageQcRects, type ImageQcRect } from "../../src/helper/getImageQcRects"
 import {
     applyLocale,
@@ -52,7 +57,7 @@ interface Point {
 
 type ResizeCorner = "northWest" | "northEast" | "southWest" | "southEast"
 type PreviewMode = "none" | "scale" | "jpeg" | "jpeg720"
-type AlgorithmId = "fft" | "v5" | "v6" | "v7" | "v8"
+type AlgorithmId = "fft" | "v5" | "v6" | "v7" | "v8" | "v8c"
 type PreScaleMode = "none" | "600" | "720" | "900" | "1080" | "custom"
 
 const JPEG_GRID_SIZE = 16
@@ -266,7 +271,7 @@ export default defineComponent({
         onPasswordChange() {
             this.errorMessage = ""
             this.closeOutput()
-            if (this.algorithm === "v8") this.refreshPreviews()
+            if (this.algorithm === "v8" || this.algorithm === "v8c") this.refreshPreviews()
         },
 
         /**
@@ -278,7 +283,8 @@ export default defineComponent({
             if (this.algorithm === "v5") return image2fd_by_fft_v5(image)
             if (this.algorithm === "v6") return image2fd_by_fft_v6(image)
             if (this.algorithm === "v7") return image2fd_by_fft_v7(image)
-            return image2fd_by_fft_v8(image, this.password)
+            if (this.algorithm === "v8") return image2fd_by_fft_v8(image, this.password)
+            return image2fd_by_fft_v8c(image, this.password)
         },
 
         /**
@@ -296,7 +302,11 @@ export default defineComponent({
                     carrierY: rect?.y,
                 })
             }
-            return fd2image_by_fft_v8(image, this.password, {
+            if (this.algorithm === "v8") return fd2image_by_fft_v8(image, this.password, {
+                carrierX: rect?.x,
+                carrierY: rect?.y,
+            })
+            return fd2image_by_fft_v8c(image, this.password, {
                 carrierX: rect?.x,
                 carrierY: rect?.y,
             })
@@ -317,7 +327,10 @@ export default defineComponent({
             if (this.algorithm === "v5") return scale_fd_by_fft_v5(image, width, height)
             if (this.algorithm === "v6") return scale_fd_by_fft_v6(image, width, height)
             if (this.algorithm === "v7") return scale_fd_by_fft_v7(image, width, height)
-            return scale_fd_by_fft_v8(image, width, height, this.password)
+            if (this.algorithm === "v8") {
+                return scale_fd_by_fft_v8(image, width, height, this.password)
+            }
+            return scale_fd_by_fft_v8c(image, width, height, this.password)
         },
 
         /** 获取当前提前缩放设置对应的宽度。
@@ -1132,7 +1145,7 @@ export default defineComponent({
                         this.sourceMimeType === "image/png"
                             ? this.algorithm === "v5"
                                 ? 253
-                                : ["v6", "v7", "v8"].includes(this.algorithm)
+                                : ["v6", "v7", "v8", "v8c"].includes(this.algorithm)
                                   ? 252
                                   : 255
                             : 255
@@ -1235,6 +1248,12 @@ export default defineComponent({
                     </button>
                     <button :class="{ active: algorithm === 'v8' }" @click="setAlgorithm('v8')">
                         v8
+                    </button>
+                    <button
+                        :class="{ active: algorithm === 'v8c' }"
+                        @click="setAlgorithm('v8c')"
+                    >
+                        v8c
                     </button>
                 </div>
                 <button
@@ -1605,7 +1624,7 @@ export default defineComponent({
                 <div class="workspace-footer">
                     <div class="footer-security">
                         <span>{{ t("localOnly") }}</span>
-                        <label v-if="algorithm === 'v8'" class="password-field">
+                        <label v-if="algorithm === 'v8' || algorithm === 'v8c'" class="password-field">
                             <span>{{
                                 mode === "encode" ? t("setPassword") : t("restorePassword")
                             }}</span>

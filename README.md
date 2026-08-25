@@ -107,6 +107,19 @@ const encoded = await image2fd_by_fft_v8(source, password)
 const restored = await fd2image_by_fft_v8(encoded, password)
 ```
 
+实验性的 v8c 使用彩色高容量载体：Y 均值保存 JPEG 基础层，Cb/Cr 均值与
+色度正交纹理在 PNG 中共同保存优先级最高的 144 个局部频谱系数。它优先提高
+未缩放 PNG 和 JPEG 的还原质量，不支持直接缩放载体；需要缩放时应调用
+`scale_fd_by_fft_v8c` 解码、缩放并重新编码。载体最外圈使用一像素洋红色边框，
+用于在高色度 PNG 或 JPEG 中稳定识别区域：
+
+```ts
+import { fd2image_by_fft_v8c, image2fd_by_fft_v8c } from "q_____c"
+
+const colorCarrier = await image2fd_by_fft_v8c(source, password)
+const colorRestored = await fd2image_by_fft_v8c(colorCarrier, password)
+```
+
 从一张完整图片中识别 Q_____c 区域：
 
 ```ts

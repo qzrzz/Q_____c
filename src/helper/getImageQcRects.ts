@@ -24,7 +24,7 @@ const MIN_RECT_AREA = 2048
 
 /**
  * 判断像素是否符合骑马赛克频域图的中性、中心化视觉特征。
- * 识别只读取 RGB 像素，不依赖 alpha、元数据或隐藏标记。
+ * 旧格式仅读取 RGB；v8c PNG 可额外利用 alpha 格式标记，但不依赖文件元数据。
  * @param data RGBA 像素缓冲区
  * @param offset 像素起始偏移
  */
@@ -35,7 +35,7 @@ function isFrequencyPixel(data: Uint8Array | Uint8ClampedArray, offset: number):
     const centerDistance =
         (Math.abs(red - 128) + Math.abs(green - 128) + Math.abs(blue - 128)) / 3
     const saturation = Math.max(red, green, blue) - Math.min(red, green, blue)
-    return centerDistance < 40 && saturation < 30
+    return data[offset + 3] === 250 || (centerDistance < 40 && saturation < 30)
 }
 
 /**
@@ -396,12 +396,229 @@ function snapRectToEdges(
     return { x: left, y: top, width: right - left, height: bottom - top }
 }
 
+/** 判断像素是否接近 v8c 洋红色识别边框。 @param data RGBA 像素缓冲区 @param offset 像素起始偏移 */
+function isV8cBorderPixel(data: Uint8Array | Uint8ClampedArray, offset: number): boolean {
+    const red = data[offset]
+    const green = data[offset + 1]
+    const blue = data[offset + 2]
+    return red >= 155 && blue >= 150 && green <= 85 &&
+        Math.abs(red - blue) <= 45 && red - green >= 75 && blue - green >= 65
+}
+
+/** 根据 v8c PNG 的 alpha 格式标记识别未经扁平化的区域。 @param image 输入图像 */
+function getV8cAlphaRects(image: ImageDataLike): ImageQcRect[] {
+    const columns = Math.ceil(image.width / CELL_SIZE)
+    const rows = Math.ceil(image.height / CELL_SIZE)
+    const active = new Uint8Array(columns * rows)
+    const scores = new Float32Array(columns * rows)
+    for (let cellY = 0; cellY < rows; cellY++) for (let cellX = 0; cellX < columns; cellX++) {
+        let matched = 0
+        let total = 0
+        for (let y = cellY * CELL_SIZE; y < Math.min(image.height, (cellY + 1) * CELL_SIZE); y++) {
+            for (let x = cellX * CELL_SIZE; x < Math.min(image.width, (cellX + 1) * CELL_SIZE); x++) {
+                if (image.data[(y * image.width + x) * 4 + 3] === 250) matched++
+                total++
+            }
+        }
+        const index = cellY * columns + cellX
+        scores[index] = total === 0 ? 0 : matched / total
+        active[index] = matched > 0 ? 1 : 0
+    }
+    return collectComponents(active, scores, columns, rows)
+        .filter((component) => {
+            const boxCells =
+                (component.maxX - component.minX + 1) *
+                (component.maxY - component.minY + 1)
+            return component.cells / boxCells >= 0.7
+        })
+        .map((component) => {
+            const left = component.minX * CELL_SIZE
+            const top = component.minY * CELL_SIZE
+            const right = Math.min(image.width, (component.maxX + 1) * CELL_SIZE)
+            const bottom = Math.min(image.height, (component.maxY + 1) * CELL_SIZE)
+            let minX = right
+            let minY = bottom
+            let maxX = left - 1
+            let maxY = top - 1
+            for (let y = top; y < bottom; y++) for (let x = left; x < right; x++) {
+                if (image.data[(y * image.width + x) * 4 + 3] !== 250) continue
+                minX = Math.min(minX, x)
+                minY = Math.min(minY, y)
+                maxX = Math.max(maxX, x)
+                maxY = Math.max(maxY, y)
+            }
+            return {
+                x: minX,
+                y: minY,
+                width: maxX - minX + 1,
+                height: maxY - minY + 1,
+                confidence: 0.99,
+            }
+        })
+        .filter((rect) => rect.width >= MIN_RECT_SIZE && rect.height >= MIN_RECT_SIZE)
+        .filter((rect) => rect.width * rect.height >= MIN_RECT_AREA)
+}
+
 /**
- * 纯视觉识别图像中由 core 频域算法生成的马赛克矩形。
- * 算法先在小网格上寻找大面积的中性中心化频谱纹理，再按像素收紧边界。
+ * 根据闭合的洋红色单像素边框识别 v8c 区域。
+ * @param image 输入图像
+ */
+function getV8cBorderRects(image: ImageDataLike): ImageQcRect[] {
+    const columns = Math.ceil(image.width / CELL_SIZE)
+    const rows = Math.ceil(image.height / CELL_SIZE)
+    const active = new Uint8Array(columns * rows)
+    const scores = new Float32Array(columns * rows)
+    for (let cellY = 0; cellY < rows; cellY++) for (let cellX = 0; cellX < columns; cellX++) {
+        let matched = 0
+        let total = 0
+        for (let y = cellY * CELL_SIZE; y < Math.min(image.height, (cellY + 1) * CELL_SIZE); y++) {
+            for (let x = cellX * CELL_SIZE; x < Math.min(image.width, (cellX + 1) * CELL_SIZE); x++) {
+                if (isV8cBorderPixel(image.data, (y * image.width + x) * 4)) matched++
+                total++
+            }
+        }
+        const index = cellY * columns + cellX
+        scores[index] = total === 0 ? 0 : matched / total
+        active[index] = matched > 0 ? 1 : 0
+    }
+    return collectComponents(active, scores, columns, rows)
+        .filter((component) => {
+            const width = component.maxX - component.minX + 1
+            const height = component.maxY - component.minY + 1
+            const perimeter = Math.max(1, 2 * width + 2 * height - 4)
+            const coverage = component.cells / perimeter
+            let top = 0
+            let bottom = 0
+            let left = 0
+            let right = 0
+            for (let x = component.minX; x <= component.maxX; x++) {
+                top += active[component.minY * columns + x]
+                bottom += active[component.maxY * columns + x]
+            }
+            for (let y = component.minY; y <= component.maxY; y++) {
+                left += active[y * columns + component.minX]
+                right += active[y * columns + component.maxX]
+            }
+            return width >= 6 && height >= 6 &&
+                coverage >= 0.4 && coverage <= 1.7 &&
+                top / width >= 0.5 && bottom / width >= 0.5 &&
+                left / height >= 0.5 && right / height >= 0.5
+        })
+        .map((component) => {
+            const left = component.minX * CELL_SIZE
+            const top = component.minY * CELL_SIZE
+            const right = Math.min(image.width, (component.maxX + 1) * CELL_SIZE)
+            const bottom = Math.min(image.height, (component.maxY + 1) * CELL_SIZE)
+            let minX = right
+            let minY = bottom
+            let maxX = left - 1
+            let maxY = top - 1
+            let matched = 0
+            for (let y = top; y < bottom; y++) for (let x = left; x < right; x++) {
+                if (!isV8cBorderPixel(image.data, (y * image.width + x) * 4)) continue
+                minX = Math.min(minX, x)
+                minY = Math.min(minY, y)
+                maxX = Math.max(maxX, x)
+                maxY = Math.max(maxY, y)
+                matched++
+            }
+            const width = maxX - minX + 1
+            const height = maxY - minY + 1
+            const perimeter = Math.max(1, 2 * width + 2 * height - 4)
+            return {
+                x: minX,
+                y: minY,
+                width,
+                height,
+                confidence: Math.min(0.99, matched / perimeter),
+            }
+        })
+        .filter((rect) => rect.width >= MIN_RECT_SIZE && rect.height >= MIN_RECT_SIZE)
+        .filter((rect) => rect.width * rect.height >= MIN_RECT_AREA)
+}
+
+/**
+ * 将有损 JPEG 内部纹理识别结果向附近的 v8c 彩色边框扩展。
+ * @param image 输入图像
+ * @param rect 内部纹理矩形
+ */
+function snapRectToV8cBorder(
+    image: ImageDataLike,
+    rect: Omit<ImageQcRect, "confidence">
+): Omit<ImageQcRect, "confidence"> {
+    let left = rect.x
+    let top = rect.y
+    let right = rect.x + rect.width
+    let bottom = rect.y + rect.height
+    const verticalScore = (x: number): number => {
+        let matched = 0
+        let total = 0
+        for (let y = Math.max(0, top - 2); y < Math.min(image.height, bottom + 2); y++) {
+            if (isV8cBorderPixel(image.data, (y * image.width + x) * 4)) matched++
+            total++
+        }
+        return total === 0 ? 0 : matched / total
+    }
+    const horizontalScore = (y: number): number => {
+        let matched = 0
+        let total = 0
+        for (let x = Math.max(0, left - 2); x < Math.min(image.width, right + 2); x++) {
+            if (isV8cBorderPixel(image.data, (y * image.width + x) * 4)) matched++
+            total++
+        }
+        return total === 0 ? 0 : matched / total
+    }
+    let candidateLeft = left
+    let candidateRight = right
+    let leftScore = 0
+    let rightScore = 0
+    for (let x = Math.max(0, left - 4); x <= left; x++) {
+        const score = verticalScore(x)
+        if (score > leftScore) { candidateLeft = x; leftScore = score }
+    }
+    for (let x = right - 1; x < Math.min(image.width, right + 4); x++) {
+        const score = verticalScore(x)
+        if (score > rightScore) { candidateRight = x + 1; rightScore = score }
+    }
+    if (leftScore >= 0.18 && rightScore >= 0.18) {
+        left = candidateLeft
+        right = candidateRight
+    }
+    let candidateTop = top
+    let candidateBottom = bottom
+    let topScore = 0
+    let bottomScore = 0
+    for (let y = Math.max(0, top - 4); y <= top; y++) {
+        const score = horizontalScore(y)
+        if (score > topScore) { candidateTop = y; topScore = score }
+    }
+    for (let y = bottom - 1; y < Math.min(image.height, bottom + 4); y++) {
+        const score = horizontalScore(y)
+        if (score > bottomScore) { candidateBottom = y + 1; bottomScore = score }
+    }
+    if (topScore >= 0.18 && bottomScore >= 0.18) {
+        top = candidateTop
+        bottom = candidateBottom
+    }
+    return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
+/**
+ * 识别图像中由 core 频域算法生成的马赛克矩形。
+ * v8c 优先使用闭合彩色边框，旧格式使用中性中心化频谱纹理，再按像素收紧边界。
  * @param image 输入的 RGBA 图像数据
  */
 export function getImageQcRects(image: ImageDataLike): ImageQcRect[] {
+    const alphaRects = getV8cAlphaRects(image)
+    const borderRects = [
+        ...alphaRects,
+        ...getV8cBorderRects(image).filter((border) => !alphaRects.some((alpha) =>
+            border.x + border.width / 2 >= alpha.x &&
+            border.x + border.width / 2 < alpha.x + alpha.width &&
+            border.y + border.height / 2 >= alpha.y &&
+            border.y + border.height / 2 < alpha.y + alpha.height
+        )),
+    ]
     const columns = Math.ceil(image.width / CELL_SIZE)
     const rows = Math.ceil(image.height / CELL_SIZE)
     const active = new Uint8Array(columns * rows)
@@ -425,16 +642,14 @@ export function getImageQcRects(image: ImageDataLike): ImageQcRect[] {
                 CELL_SIZE,
                 CELL_SIZE
             )
-            active[index] =
-                ratio >= 0.65 &&
-                textures[index] >= 5.5
+            active[index] = ratio >= 0.65 && textures[index] >= 5.5
                     ? 1
                     : 0
         }
     }
 
     const grown = growFrequencyCells(active, scores, textures, columns, rows)
-    return collectComponents(grown, scores, columns, rows)
+    const textureRects = collectComponents(grown, scores, columns, rows)
         .filter((component) => component.cells >= 12)
         .filter((component) => {
             const boxCells =
@@ -449,7 +664,10 @@ export function getImageQcRects(image: ImageDataLike): ImageQcRect[] {
                 width: Math.min(image.width, (component.maxX + 1) * CELL_SIZE) - component.minX * CELL_SIZE,
                 height: Math.min(image.height, (component.maxY + 1) * CELL_SIZE) - component.minY * CELL_SIZE,
             }
-            const rect = snapRectToEdges(image, refineRect(image, rough))
+            const rect = snapRectToV8cBorder(
+                image,
+                snapRectToEdges(image, refineRect(image, rough))
+            )
             return {
                 ...rect,
                 confidence: Math.min(0.99, component.score / component.cells),
@@ -459,4 +677,11 @@ export function getImageQcRects(image: ImageDataLike): ImageQcRect[] {
         .filter((rect) => rect.width * rect.height >= MIN_RECT_AREA)
         .filter((rect) => getFrequencyRatio(image, rect.x, rect.y, rect.width, rect.height) >= 0.5)
         .filter((rect) => getTextureEnergy(image, rect.x, rect.y, rect.width, rect.height) >= 6)
+        .filter((rect) => !borderRects.some((border) =>
+            rect.x + rect.width / 2 >= border.x &&
+            rect.x + rect.width / 2 < border.x + border.width &&
+            rect.y + rect.height / 2 >= border.y &&
+            rect.y + rect.height / 2 < border.y + border.height
+        ))
+    return [...borderRects, ...textureRects]
 }
