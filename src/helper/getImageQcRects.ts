@@ -459,11 +459,157 @@ function getV8cAlphaRects(image: ImageDataLike): ImageQcRect[] {
         .filter((rect) => rect.width * rect.height >= MIN_RECT_AREA)
 }
 
+interface V8cBorderLine {
+    left: number
+    right: number
+    y: number
+    lastY: number
+    coverage: number
+    strength: number
+}
+
 /**
- * 根据闭合的洋红色单像素边框识别 v8c 区域。
+ * 从水平长线配对四条外边框，不要求内部色彩与边框断开。
  * @param image 输入图像
+ * @param faded 是否容许 JPEG 导致的色彩衰减
  */
+function getV8cLineRects(image: ImageDataLike, faded: boolean): ImageQcRect[] {
+    const mask = new Uint8Array(image.width * image.height)
+    const lines: V8cBorderLine[] = []
+    let previous: V8cBorderLine[] = []
+    for (let y = 0; y < image.height; y++) {
+        const current: V8cBorderLine[] = []
+        let start = -1
+        let last = -1
+        let matched = 0
+        let strength = 0
+        for (let x = 0; x <= image.width + 2; x++) {
+            const offset = (y * image.width + x) * 4
+            // JPEG 色度抽样会降低边框亮度；这里只检查洋红色差，随后严格验证四边闭合。
+            if (x < image.width && (faded
+                ? image.data[offset] - image.data[offset + 1] > 45 && image.data[offset + 2] - image.data[offset + 1] > 45
+                : image.data[offset] >= 210 && image.data[offset + 2] >= 210 &&
+                    image.data[offset + 1] <= 45 && Math.abs(image.data[offset] - image.data[offset + 2]) <= 25)) {
+                mask[y * image.width + x] = 1
+                if (start < 0) start = x
+                last = x
+                matched++
+                strength += image.data[offset] + image.data[offset + 2] - 2 * image.data[offset + 1]
+            } else if (start >= 0 && x - last > 2) {
+                const length = last - start + 1
+                if (length >= MIN_RECT_SIZE && matched / length >= 0.9) {
+                    const line: V8cBorderLine = {
+                        left: start, right: last + 1, y, lastY: y,
+                        coverage: matched / length, strength: strength / length,
+                    }
+                    const band = previous.find((candidate) =>
+                        Math.abs(candidate.left - line.left) <= 2 &&
+                        Math.abs(candidate.right - line.right) <= 2
+                    )
+                    // JPEG 会把一条边线扩散成相邻数行；合并成一个候选，保留最强行。
+                    if (band) {
+                        if (line.strength > band.strength) Object.assign(band, line)
+                        band.lastY = y
+                        current.push(band)
+                    } else {
+                        lines.push(line)
+                        current.push(line)
+                    }
+                }
+                start = -1
+                matched = 0
+                strength = 0
+            }
+        }
+        previous = current
+    }
+
+    const columns = new Map<number, Uint32Array>()
+    /** 通过按需缓存的列前缀和计算边线覆盖率。 @param x 列坐标 @param top 起始行 @param bottom 结束行 */
+    const columnCoverage = (x: number, top: number, bottom: number): number => {
+        if (x < 0 || x >= image.width) return 0
+        let prefix = columns.get(x)
+        if (!prefix) {
+            prefix = new Uint32Array(image.height + 1)
+            for (let y = 0; y < image.height; y++) prefix[y + 1] = prefix[y] + mask[y * image.width + x]
+            columns.set(x, prefix)
+        }
+        return (prefix[bottom] - prefix[top]) / (bottom - top)
+    }
+    /** 检查是否存在将两个独立矩形连成一个大框的长断口。 @param x 列坐标 @param top 起始行 @param bottom 结束行 */
+    const hasLongGap = (x: number, top: number, bottom: number): boolean => {
+        let gap = 0
+        const maximumGap = Math.max(4, Math.floor((bottom - top) * 0.02))
+        for (let y = top; y < bottom; y++) {
+            gap = mask[y * image.width + x] ? 0 : gap + 1
+            if (gap > maximumGap) return true
+        }
+        return false
+    }
+    // 只比较端点相邻的水平线，避免把全图所有线段两两组合。
+    const buckets = new Map<string, V8cBorderLine[]>()
+    for (const line of lines) {
+        const key = `${Math.floor(line.left / 4)}:${Math.floor(line.right / 4)}`
+        const bucket = buckets.get(key) ?? []
+        bucket.push(line)
+        buckets.set(key, bucket)
+    }
+    const used = new Set<V8cBorderLine>()
+    const rects: ImageQcRect[] = []
+    for (const top of lines) {
+        if (used.has(top)) continue
+        // 外框已确认后，内部偶然排列成直线的码字不能再生成嵌套区域。
+        if (rects.some((rect) => top.left >= rect.x && top.right <= rect.x + rect.width &&
+            top.y >= rect.y && top.y < rect.y + rect.height)) continue
+        const candidates: V8cBorderLine[] = []
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+            candidates.push(...(buckets.get(
+                `${Math.floor(top.left / 4) + dx}:${Math.floor(top.right / 4) + dy}`
+            ) ?? []))
+        }
+        candidates.sort((a, b) => b.coverage - a.coverage || b.strength - a.strength || a.y - b.y)
+        for (const bottom of candidates) {
+            if (used.has(bottom) || bottom.y - top.lastY + 1 < MIN_RECT_SIZE ||
+                Math.abs(top.left - bottom.left) > 2 || Math.abs(top.right - bottom.right) > 2) continue
+            let left = top.left
+            let right = top.right - 1
+            let leftScore = 0
+            let rightScore = 0
+            for (let x = Math.min(top.left, bottom.left); x <= Math.max(top.left, bottom.left); x++) {
+                const score = columnCoverage(x, top.y, bottom.y + 1)
+                if (score > leftScore) { left = x; leftScore = score }
+            }
+            for (let x = Math.min(top.right, bottom.right) - 1; x < Math.max(top.right, bottom.right); x++) {
+                const score = columnCoverage(x, top.y, bottom.y + 1)
+                if (score > rightScore) { right = x; rightScore = score }
+            }
+            if (leftScore < 0.9 || rightScore < 0.9 ||
+                hasLongGap(left, top.y, bottom.y + 1) || hasLongGap(right, top.y, bottom.y + 1)) continue
+            const rect = {
+                x: left, y: top.y, width: right - left + 1, height: bottom.y - top.y + 1,
+                confidence: Math.min(0.99, top.coverage, bottom.coverage, leftScore, rightScore),
+            }
+            if (rect.width * rect.height < MIN_RECT_AREA ||
+                getTextureEnergy(image, rect.x + 2, rect.y + 2, rect.width - 4, rect.height - 4) < 6) continue
+            rects.push(rect)
+            used.add(top)
+            used.add(bottom)
+            break
+        }
+    }
+    return rects
+}
+
+/** 根据四边直线识别 v8c，并为 JPEG 断续边框保留连通分量兜底。 @param image 输入图像 */
 function getV8cBorderRects(image: ImageDataLike): ImageQcRect[] {
+    // 严格颜色先定位 PNG，宽容颜色补 JPEG，避免背景相似色把原始边线横向延长。
+    const exactRects = getV8cLineRects(image, false)
+    const lineRects = [...exactRects, ...getV8cLineRects(image, true).filter((rect) =>
+        !exactRects.some((exact) =>
+            Math.min(rect.x + rect.width, exact.x + exact.width) > Math.max(rect.x, exact.x) &&
+            Math.min(rect.y + rect.height, exact.y + exact.height) > Math.max(rect.y, exact.y)
+        )
+    )]
     const columns = Math.ceil(image.width / CELL_SIZE)
     const rows = Math.ceil(image.height / CELL_SIZE)
     const active = new Uint8Array(columns * rows)
@@ -481,7 +627,7 @@ function getV8cBorderRects(image: ImageDataLike): ImageQcRect[] {
         scores[index] = total === 0 ? 0 : matched / total
         active[index] = matched > 0 ? 1 : 0
     }
-    return collectComponents(active, scores, columns, rows)
+    const componentRects = collectComponents(active, scores, columns, rows)
         .filter((component) => {
             const width = component.maxX - component.minX + 1
             const height = component.maxY - component.minY + 1
@@ -535,6 +681,10 @@ function getV8cBorderRects(image: ImageDataLike): ImageQcRect[] {
         })
         .filter((rect) => rect.width >= MIN_RECT_SIZE && rect.height >= MIN_RECT_SIZE)
         .filter((rect) => rect.width * rect.height >= MIN_RECT_AREA)
+    return [...lineRects, ...componentRects.filter((rect) => !lineRects.some((line) =>
+        rect.x + rect.width / 2 >= line.x && rect.x + rect.width / 2 < line.x + line.width &&
+        rect.y + rect.height / 2 >= line.y && rect.y + rect.height / 2 < line.y + line.height
+    ))]
 }
 
 /**
@@ -677,11 +827,11 @@ export function getImageQcRects(image: ImageDataLike): ImageQcRect[] {
         .filter((rect) => rect.width * rect.height >= MIN_RECT_AREA)
         .filter((rect) => getFrequencyRatio(image, rect.x, rect.y, rect.width, rect.height) >= 0.5)
         .filter((rect) => getTextureEnergy(image, rect.x, rect.y, rect.width, rect.height) >= 6)
+        // 纹理兜底框不能跨越已确认的边框；仅检查中心会漏掉沿边向外生长的伪区域。
+        // 容许一个网格以内的边缘误差，避免误删紧邻的独立区域。
         .filter((rect) => !borderRects.some((border) =>
-            rect.x + rect.width / 2 >= border.x &&
-            rect.x + rect.width / 2 < border.x + border.width &&
-            rect.y + rect.height / 2 >= border.y &&
-            rect.y + rect.height / 2 < border.y + border.height
+            Math.min(rect.x + rect.width, border.x + border.width) - Math.max(rect.x, border.x) > CELL_SIZE &&
+            Math.min(rect.y + rect.height, border.y + border.height) - Math.max(rect.y, border.y) > CELL_SIZE
         ))
     return [...borderRects, ...textureRects]
 }

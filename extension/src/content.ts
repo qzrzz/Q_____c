@@ -3,6 +3,7 @@ import { fd2image_by_fft_v7 } from "../../src/core/image2fd_by_fft-v7"
 import { fd2image_by_fft_v8 } from "../../src/core/image2fd_by_fft-v8"
 import { fd2image_by_fft_v8c } from "../../src/core/image2fd_by_fft-v8c"
 import { getImageQcRects, type ImageQcRect } from "../../src/helper/getImageQcRects"
+import { decodeImageQcAuto } from "../../src/helper/decodeImageQcAuto"
 import { isSiteEnabled, loadSettings, type ExtensionSettings } from "./shared/settings"
 
 interface ImageState {
@@ -240,6 +241,11 @@ async function readImageData(image: HTMLImageElement): Promise<ImageData> {
 
 /** 根据设置选择算法，恢复一个被识别出的频域区域。 @param image 频域区域 @param rect 区域在整图中的位置 */
 async function decodeRect(image: ImageData, rect: ImageQcRect): Promise<ImageData> {
+    if (settings.algorithm === "auto") {
+        const result = await decodeImageQcAuto(image, settings.password)
+        debug("自动识别算法版本", { version: result.version, rect, error: result.validationError })
+        return new ImageData(new Uint8ClampedArray(result.image.data), result.image.width, result.image.height)
+    }
     if (settings.algorithm === "v6") {
         const result = await fd2image_by_fft_v6(image)
         return new ImageData(new Uint8ClampedArray(result.data), result.width, result.height)

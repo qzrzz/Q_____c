@@ -20,14 +20,14 @@ test("指定列表会匹配域名和子域名", () => {
     expect(isSiteEnabled(settings, "example.com.evil.test")).toBe(false)
 })
 
-test("loadSettings 正确读取并校验 v8c 算法", async () => {
+test.each(["auto", "v8c", "v8", "v7", "v6", undefined, "invalid"])("loadSettings 正确读取算法 %s 并为缺省值启用自动识别", async (algorithm) => {
     const globalAny = globalThis as unknown as { chrome?: unknown }
     const originalChrome = globalAny.chrome
     globalAny.chrome = {
         storage: {
             sync: {
                 get: (_keys: unknown, callback: (result: Record<string, unknown>) => void) => {
-                    callback({ algorithm: "v8c", password: "custom-password" })
+                    callback({ algorithm, password: "custom-password" })
                 },
             },
         },
@@ -35,7 +35,7 @@ test("loadSettings 正确读取并校验 v8c 算法", async () => {
     try {
         const { loadSettings } = await import("../settings")
         const settings = await loadSettings()
-        expect(settings.algorithm).toBe("v8c")
+        expect(settings.algorithm).toBe(algorithm === undefined || algorithm === "invalid" ? "auto" : algorithm)
         expect(settings.password).toBe("custom-password")
     } finally {
         globalAny.chrome = originalChrome

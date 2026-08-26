@@ -33,6 +33,7 @@ import {
     scale_fd_by_fft_v8c,
 } from "../../src/core/image2fd_by_fft-v8c"
 import { getImageQcRects, type ImageQcRect } from "../../src/helper/getImageQcRects"
+import { detectEditorAlgorithm } from "./helper/detectAlgorithm"
 import {
     applyLocale,
     getInitialLocale,
@@ -77,6 +78,9 @@ export default defineComponent({
             locale: getInitialLocale() as Locale,
             mode: "encode" as "encode" | "decode",
             algorithm: "v8" as AlgorithmId,
+            detectionRevision: 0,
+            algorithmSelectionRevision: 0,
+            fileLoadRevision: 0,
             password: "",
             sourceName: "",
             sourceMimeType: "",
@@ -251,18 +255,20 @@ export default defineComponent({
         /** 切换编码或解码工作模式。 */
         async setMode(mode: "encode" | "decode") {
             if (this.mode === mode) return
+            const selectionRevision = ++this.algorithmSelectionRevision
             this.mode = mode
             this.closeOutput()
             this.selectedId = null
             if (this.originalImageData) {
                 await this.refreshWorkingImage()
-                if (mode === "decode") await this.detectRects()
+                if (mode === "decode") await this.detectRects(true, selectionRevision)
             }
         },
 
         /** 切换当前编码与解码使用的频域算法。 */
         setAlgorithm(algorithm: AlgorithmId) {
-            if (this.algorithm === algorithm) return
+            // 即使点击当前版本，也视为明确选择，防止导入中的异步判断覆盖手动操作。
+            this.algorithmSelectionRevision++
             this.algorithm = algorithm
             this.errorMessage = ""
             this.closeOutput()
@@ -271,6 +277,7 @@ export default defineComponent({
 
         /** 密码改变后清除旧结果，并使用新密码刷新 v8 预览。 */
         onPasswordChange() {
+            this.algorithmSelectionRevision++
             this.errorMessage = ""
             this.closeOutput()
             if (this.algorithm === "v8" || this.algorithm === "v8c") this.refreshPreviews()
@@ -513,16 +520,20 @@ export default defineComponent({
                 this.errorMessage = this.t("invalidFile")
                 return
             }
+            const selectionRevision = ++this.algorithmSelectionRevision
+            const loadRevision = ++this.fileLoadRevision
             this.errorMessage = ""
             this.importingHeic = isHeic
             try {
                 const sourceFile = isHeic ? await this.convertHeicToPng(file) : file
+                if (loadRevision !== this.fileLoadRevision) return
                 if (this.sourceUrl) URL.revokeObjectURL(this.sourceUrl)
                 this.sourceUrl = URL.createObjectURL(sourceFile)
                 const image = new Image()
                 image.decoding = "async"
                 image.src = this.sourceUrl
                 await image.decode()
+                if (loadRevision !== this.fileLoadRevision) return
                 const canvas = document.createElement("canvas")
                 canvas.width = image.naturalWidth
                 canvas.height = image.naturalHeight
@@ -533,15 +544,17 @@ export default defineComponent({
                 this.sourceName = file.name || `clipboard-${Date.now()}.png`
                 this.sourceMimeType = sourceFile.type
                 await this.refreshWorkingImage()
-                if (this.mode === "decode") await this.detectRects()
+                if (loadRevision !== this.fileLoadRevision) return
+                if (this.mode === "decode") await this.detectRects(true, selectionRevision)
             } catch (error) {
+                if (loadRevision !== this.fileLoadRevision) return
                 this.errorMessage = isHeic
                     ? this.t("heicImportFailed")
                     : error instanceof Error
                       ? error.message
                       : this.t("invalidFile")
             } finally {
-                this.importingHeic = false
+                if (loadRevision === this.fileLoadRevision) this.importingHeic = false
             }
         },
 
@@ -881,19 +894,46 @@ export default defineComponent({
             this.nextRectId = Math.max(1, ...rects.map((rect) => rect.id + 1))
         },
 
-        /** 使用纯视觉算法识别频域马赛克区域。 */
-        async detectRects() {
+        /**
+         * 识别马赛克区域；导入或切换到解码时额外判断并选中具体版本。
+         * @param selectAlgorithm 是否自动选择算法版本
+         * @param selectionRevision 发起导入时的手动选择序号，用于丢弃过期推荐
+         */
+        async detectRects(selectAlgorithm = false, selectionRevision?: number) {
             if (!this.sourceImageData) return
+            selectionRevision ??= this.algorithmSelectionRevision
+            const source = this.sourceImageData
+            const revision = ++this.detectionRevision
+            const password = this.password
             this.busy = true
-            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-            const detected = getImageQcRects(this.sourceImageData)
-            this.replaceRects(
-                detected.map((rect: ImageQcRect, index: number) =>
-                    this.alignDetectedRect({ ...rect, id: index + 1 })
+            try {
+                await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+                if (revision !== this.detectionRevision || source !== this.sourceImageData || this.mode !== "decode") return
+                const detected = getImageQcRects(source)
+                this.replaceRects(
+                    detected.map((rect: ImageQcRect, index: number) =>
+                        this.alignDetectedRect({ ...rect, id: index + 1 })
+                    )
                 )
-            )
-            this.busy = false
-            void this.refreshDecodePreview()
+                if (selectAlgorithm && this.rects.length > 0 && selectionRevision === this.algorithmSelectionRevision) {
+                    const version = await detectEditorAlgorithm(source, this.rects, password)
+                    if (revision !== this.detectionRevision || source !== this.sourceImageData ||
+                        selectionRevision !== this.algorithmSelectionRevision || password !== this.password || this.mode !== "decode") return
+                    if (!version) {
+                        this.errorMessage = this.t("algorithmDetectionFailed")
+                        return
+                    }
+                    this.algorithm = version
+                    this.errorMessage = ""
+                }
+                void this.refreshDecodePreview()
+            } catch (error) {
+                if (revision === this.detectionRevision && selectionRevision === this.algorithmSelectionRevision) {
+                    this.errorMessage = error instanceof Error ? error.message : this.t("algorithmDetectionFailed")
+                }
+            } finally {
+                if (revision === this.detectionRevision) this.busy = false
+            }
         },
 
         /** 创建包含原图像素的离屏画布。 */
@@ -1187,7 +1227,7 @@ export default defineComponent({
                 const context = canvas.getContext("2d")!
                 for (const rect of this.rects) {
                     const frequency = context.getImageData(rect.x, rect.y, rect.width, rect.height)
-                    // PNG 恢复所选版本的完整层标记；有损格式使用无标记的可靠基础层。
+                    // 旧版本沿用文件类型提示；v8/v8c 自行验证增强层，不能仅凭 PNG 扩展名伪造标记。
                     const frequencyAlpha =
                         this.sourceMimeType === "image/png"
                             ? this.algorithm === "v5"
@@ -1196,8 +1236,10 @@ export default defineComponent({
                                   ? 252
                                   : 255
                             : 255
-                    for (let offset = 3; offset < frequency.data.length; offset += 4) {
-                        frequency.data[offset] = frequencyAlpha
+                    if (this.algorithm !== "v8" && this.algorithm !== "v8c") {
+                        for (let offset = 3; offset < frequency.data.length; offset += 4) {
+                            frequency.data[offset] = frequencyAlpha
+                        }
                     }
                     const decoded = await this.decodeFrequency(frequency, rect)
                     context.putImageData(
@@ -1403,7 +1445,7 @@ export default defineComponent({
                                     <option value="600">600</option>
                                     <option value="720">720 - X</option>
                                     <option value="900">900 - Pixiv</option>
-                                    <option value="1080">1080 - RedNote</option>
+                                    <option value="1080">1080 - 小红书</option>
                                     <option value="2000">2000 - Bilibili</option>
                                     <option value="custom">{{ t("customSize") }}</option>
                                 </select>
@@ -1660,7 +1702,7 @@ export default defineComponent({
                             >
                                 {{ t("removeFalsePositive") }}
                             </button>
-                            <button class="rescan" :disabled="busy" @click="detectRects">
+                            <button class="rescan" :disabled="busy" @click="detectRects()">
                                 {{ t("rescan") }}
                             </button>
                         </div>

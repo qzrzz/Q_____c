@@ -14,6 +14,7 @@ export * from "./core/image2fd_by_fft-v8c"
 export * from "./core/frequency_fft"
 export * from "./core/test/benchmarkFn"
 export * from "./helper/getImageQcRects"
+export * from "./helper/decodeImageQcAuto"
 
 /**
  * 示例打招呼函数
