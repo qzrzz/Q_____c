@@ -27,24 +27,32 @@ interface DownloadImageResult {
 const states = new WeakMap<HTMLImageElement, ImageState>()
 const observedImages = new Set<HTMLImageElement>()
 const imageViewportStates = new WeakMap<HTMLImageElement, boolean>()
+const inspectionQueue = new Set<HTMLImageElement>()
+const pendingMutationRoots = new Set<Node>()
+const MAX_CONCURRENT_INSPECTIONS = 2
 let settings: ExtensionSettings
 let manualRunActive = false
 let decoderButtonLayer: HTMLDivElement
 let placementFrame = 0
+let activeInspections = 0
+let mutationFrame = 0
 const DEBUG_PREFIX = "[Q_____c]"
 
-// IntersectionObserver 能感知普通页面和内部滚动容器的裁剪范围，避免固定按钮遗留在屏幕上。
+// 提前一屏预热识别；实际按钮仍按真实视口边界显示，避免用户滚到图片时才开始下载和检测。
 const imageVisibilityObserver = new IntersectionObserver((entries) => {
     for (const entry of entries) {
         const image = entry.target as HTMLImageElement
         const isInViewport = entry.isIntersecting && entry.intersectionRatio > 0
         imageViewportStates.set(image, isInViewport)
+        if (!isInViewport) inspectionQueue.delete(image)
         const state = states.get(image)
-        if (!state) continue
-        state.isInViewport = isInViewport
-        if (state.button) scheduleButtonPlacement()
+        if (state) {
+            state.isInViewport = isInViewport
+            if (state.button) scheduleButtonPlacement()
+        }
+        if (isInViewport) queueImageInspection(image)
     }
-})
+}, { rootMargin: "480px 0px" })
 
 // 图片的 CSS 尺寸变化不一定会触发 window.resize；单独观察以保证按钮始终与图片同一位置。
 const imageResizeObserver = new ResizeObserver(() => scheduleButtonPlacement())
@@ -147,6 +155,44 @@ function base64ToBlob(base64: string, contentType: string): Blob {
     return new Blob([bytes], { type: contentType || "application/octet-stream" })
 }
 
+/** 从整图像素中裁出一个候选载体区域，供自动验证器试解码。 @param source 整张图片像素 @param rect 候选区域 */
+function cropImageData(source: ImageData, rect: ImageQcRect): ImageData {
+    const data = new Uint8ClampedArray(rect.width * rect.height * 4)
+    for (let row = 0; row < rect.height; row++) {
+        const from = ((rect.y + row) * source.width + rect.x) * 4
+        data.set(source.data.subarray(from, from + rect.width * 4), row * rect.width * 4)
+    }
+    return new ImageData(data, rect.width, rect.height)
+}
+
+/**
+ * 使用自动解码器验证候选区域，排除仅在视觉上类似频域纹理的普通图片。
+ * 明确指定算法时保留原有的兼容模式，方便处理没有可验证签名的旧版 v6 载体。
+ * @param source 整张图片像素
+ * @param candidates 视觉检测得到的候选区域
+ */
+async function verifyDetectedRects(source: ImageData, candidates: ImageQcRect[]): Promise<ImageQcRect[]> {
+    if (settings.algorithm !== "auto") return candidates
+    const verified: ImageQcRect[] = []
+    for (const rect of candidates) {
+        try {
+            const result = await decodeImageQcAuto(cropImageData(source, rect), settings.password)
+            verified.push(rect)
+            debug("候选区域已通过编码验证", {
+                rect,
+                version: result.version,
+                validationError: result.validationError,
+            })
+        } catch (error) {
+            debug("候选区域未通过编码验证，已忽略", {
+                rect,
+                error: error instanceof Error ? error.message : String(error),
+            })
+        }
+    }
+    return verified
+}
+
 /** 删除图片关联的按钮，并释放已替换图片的临时地址。 @param state 图片处理状态 */
 function disposeState(state: ImageState) {
     state.button?.remove()
@@ -160,9 +206,32 @@ function disposeDetachedImages() {
         if (image.isConnected) continue
         imageVisibilityObserver.unobserve(image)
         imageResizeObserver.unobserve(image)
+        inspectionQueue.delete(image)
         const state = states.get(image)
         if (state) disposeState(state)
         observedImages.delete(image)
+    }
+}
+
+/** 将处于视口预热范围内的图片加入有限并发识别队列。 @param image 待识别的网页图片 */
+function queueImageInspection(image: HTMLImageElement) {
+    if (!isEnabled() || imageViewportStates.get(image) !== true) return
+    const state = states.get(image)
+    if (state?.processing || state?.decoded) return
+    inspectionQueue.add(image)
+    drainInspectionQueue()
+}
+
+/** 按固定并发数执行图片识别，避免长图页面同时占满网络、CPU 和内存。 */
+function drainInspectionQueue() {
+    while (activeInspections < MAX_CONCURRENT_INSPECTIONS && inspectionQueue.size) {
+        const image = inspectionQueue.values().next().value as HTMLImageElement
+        inspectionQueue.delete(image)
+        activeInspections++
+        void inspectImage(image).finally(() => {
+            activeInspections--
+            drainInspectionQueue()
+        })
     }
 }
 
@@ -336,6 +405,8 @@ function showDecodeButton(image: HTMLImageElement, state: ImageState) {
 /** 执行识别；在自动模式下立即恢复，在手动模式下显示按钮。 @param image 网页图片 */
 async function inspectImage(image: HTMLImageElement) {
     if (!isEnabled() || image.dataset.qcDecoderDecoded === "true") return
+    // 图片离开预热范围后不再启动新的网络读取；已开始的任务可自然结束，不中断用户已看到的按钮。
+    if (imageViewportStates.get(image) !== true) return
     const sourceUrl = getImageUrl(image)
     if (!sourceUrl || !image.complete || !image.naturalWidth || !image.naturalHeight) return
     if (isUnsupportedImageUrl(sourceUrl)) return
@@ -376,9 +447,15 @@ async function inspectImage(image: HTMLImageElement) {
             debug("跳过超大图片", { url: sourceUrl, width: source.width, height: source.height })
             return
         }
-        state.rects = getImageQcRects(source)
+        const candidates = getImageQcRects(source)
+        state.rects = await verifyDetectedRects(source, candidates)
         state.detected = true
-        debug("图片识别完成", { url: sourceUrl, rectCount: state.rects.length, rects: state.rects })
+        debug("图片识别完成", {
+            url: sourceUrl,
+            candidateCount: candidates.length,
+            rectCount: state.rects.length,
+            rects: state.rects,
+        })
         if (!state.rects.length) return
         if (getDecodeMode() === "auto") {
             // 识别阶段已结束，释放占用标记后才能进入同一图片的解码流程。
@@ -437,8 +514,7 @@ function observeImage(image: HTMLImageElement) {
     observedImages.add(image)
     imageVisibilityObserver.observe(image)
     imageResizeObserver.observe(image)
-    image.addEventListener("load", () => void inspectImage(image))
-    if (image.complete) void inspectImage(image)
+    image.addEventListener("load", () => queueImageInspection(image))
 }
 
 /** 扫描当前文档的所有图片。 */
@@ -448,12 +524,37 @@ function scanImages() {
     return images
 }
 
+/** 仅观察 DOM 本次新增节点内的图片，避免瀑布流页面每次变更都全量查询文档。 @param root 新增的 DOM 节点 */
+function observeImagesInNode(root: Node) {
+    if (!root.isConnected) return
+    if (root instanceof HTMLImageElement) {
+        observeImage(root)
+        return
+    }
+    if (!(root instanceof Element)) return
+    root.querySelectorAll<HTMLImageElement>("img").forEach(observeImage)
+}
+
+/** 合并同一帧内的 DOM 变更，并只处理新增子树。 @param records DOM 变更记录 */
+function scheduleMutationHandling(records: MutationRecord[]) {
+    for (const record of records) record.addedNodes.forEach((node) => pendingMutationRoots.add(node))
+    if (mutationFrame) return
+    mutationFrame = requestAnimationFrame(() => {
+        mutationFrame = 0
+        disposeDetachedImages()
+        disposeOrphanedButtons()
+        for (const root of pendingMutationRoots) observeImagesInNode(root)
+        pendingMutationRoots.clear()
+        scheduleButtonPlacement()
+    })
+}
+
 /** 启动一次仅限当前页面生命周期的手动扫描。 */
 function runCurrentPage() {
     manualRunActive = true
     const images = scanImages()
-    // 图片可能在扩展初始加载时已被观察，但因网站规则未命中而未进入识别；手动运行需再次触发。
-    images.forEach((image) => void inspectImage(image))
+    // 图片可能在扩展初始加载时已被观察，但因网站规则未命中而未进入识别；手动运行需再次入队。
+    images.forEach(queueImageInspection)
     const eligibleImageCount = images.filter(
         (image) => image.naturalWidth > 300 && image.naturalHeight > 300
     ).length
@@ -470,7 +571,7 @@ function refreshPage() {
     for (const image of observedImages) {
         const state = states.get(image)
         if (!isEnabled()) state?.button?.remove()
-        else void inspectImage(image)
+        else queueImageInspection(image)
     }
 }
 
@@ -485,12 +586,7 @@ void loadSettings().then((loaded) => {
         enabled: isEnabled(),
     })
     scanImages()
-    new MutationObserver(() => {
-        disposeDetachedImages()
-        disposeOrphanedButtons()
-        scanImages()
-        scheduleButtonPlacement()
-    }).observe(document.documentElement, { childList: true, subtree: true })
+    new MutationObserver(scheduleMutationHandling).observe(document.documentElement, { childList: true, subtree: true })
 })
 
 chrome.storage.onChanged.addListener((_changes, areaName) => {
